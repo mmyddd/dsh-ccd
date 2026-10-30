@@ -1,0 +1,5 @@
+- insert:
+    - id: dsh-ccd
+      name: 'dsh-ccd'
+      config:
+        localDataRoot: !!js dshHomePath('storages', 'dsh_ccd_local')

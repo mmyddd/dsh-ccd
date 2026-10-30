@@ -1,0 +1,53 @@
+{
+  "name": "dsh-ccd",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Show the user short first-person working notes instead of the raw chain of thought, while the model keeps seeing the full reasoning",
+  "license": "AGPL-3.0",
+  "author": "YG",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "reasoning",
+    "chain-of-thought",
+    "ccd"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "local.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "test/*.mjs"
+  ],
+  "scripts": {
+    "test": "node test/notes.mjs && node test/pipeline.mjs && node test/segment.mjs && node test/store.mjs && node test/local.mjs && node test/settings.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "~3.18.5"
+  }
+}

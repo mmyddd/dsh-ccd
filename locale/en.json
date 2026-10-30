@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Working Notes (ccd)",
+    "description": "Shows short first-person working notes in place of the raw chain of thought, while the model keeps reading the full reasoning."
+  }
+}
