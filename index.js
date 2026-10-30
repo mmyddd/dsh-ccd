@@ -1049,6 +1049,25 @@ function sanitizePatch(input) {
 
 // ── HTTP surface ──────────────────────────────────────────────────────────
 
+/**
+ * Run a route body, and turn a throw into a response.
+ *
+ * The bodies are `void (async () => …)()`: a rejection in one is an unhandled rejection,
+ * and in this host that is fatal — the whole application exits with "fatal load failure"
+ * and the reader loses their session. A route that cannot finish must say so on the wire,
+ * not take the process with it. `headersSent` is checked because a body that failed after
+ * `sendJson` already answered must not be answered twice.
+ */
+function guardRoute(res, body) {
+  void body().catch((error) => {
+    if (res.headersSent) {
+      res.destroy()
+      return
+    }
+    sendJson(res, 500, { error: 'route-failed', message: describeFailure(error) })
+  })
+}
+
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload)
   res.writeHead(status, {
@@ -1907,7 +1926,7 @@ export function apply(ctx, config) {
     kind: 'exact',
     path: ROUTE_CONFIG,
     handler: (req, res) => {
-      void (async () => {
+      guardRoute(res, async () => {
         if (!sameSiteOnly(req)) {
           sendJson(res, 403, { error: 'cross-site' })
           return
@@ -1944,7 +1963,7 @@ export function apply(ctx, config) {
         // replaced, so they are dropped and the rows translate again on next mount.
         forgetWarm()
         sendJson(res, 200, snapshot(current(), ns))
-      })()
+      })
     },
   }), 'dsh-ccd: config route')
 
@@ -1952,7 +1971,7 @@ export function apply(ctx, config) {
     kind: 'exact',
     path: ROUTE_MODELS,
     handler: (req, res) => {
-      void (async () => {
+      guardRoute(res, async () => {
         if (req.method !== 'GET' && req.method !== 'HEAD') {
           sendJson(res, 405, { error: 'method-not-allowed' })
           return
@@ -1986,7 +2005,7 @@ export function apply(ctx, config) {
           const message = error instanceof Error ? error.message : String(error)
           sendJson(res, 502, { error: 'list-failed', message })
         }
-      })()
+      })
     },
   }), 'dsh-ccd: models route')
 
@@ -1994,7 +2013,7 @@ export function apply(ctx, config) {
     kind: 'exact',
     path: ROUTE_NOTES,
     handler: (req, res) => {
-      void (async () => {
+      guardRoute(res, async () => {
         if (req.method !== 'POST') {
           sendJson(res, 405, { error: 'method-not-allowed' })
           return
@@ -2036,7 +2055,7 @@ export function apply(ctx, config) {
           const message = error instanceof Error ? error.message : String(error)
           sendJson(res, 502, { error: 'note-failed', message })
         }
-      })()
+      })
     },
   }), 'dsh-ccd: notes route')
 
@@ -2046,7 +2065,7 @@ export function apply(ctx, config) {
     kind: 'exact',
     path: ROUTE_LOCALE,
     handler: (req, res) => {
-      void (async () => {
+      guardRoute(res, async () => {
         if (req.method !== 'POST') {
           sendJson(res, 405, { error: 'method-not-allowed' })
           return
@@ -2069,7 +2088,7 @@ export function apply(ctx, config) {
           }
         }
         sendJson(res, 200, { locale: readerLocale })
-      })()
+      })
     },
   }), 'dsh-ccd: locale route')
 
@@ -2077,7 +2096,7 @@ export function apply(ctx, config) {
     kind: 'exact',
     path: ROUTE_WARM,
     handler: (req, res) => {
-      void (async () => {
+      guardRoute(res, async () => {
         if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'POST') {
           sendJson(res, 405, { error: 'method-not-allowed' })
           return
@@ -2149,7 +2168,7 @@ export function apply(ctx, config) {
           }
         }
         sendJson(res, 200, { sessionId, blocks: list })
-      })()
+      })
     },
   }), 'dsh-ccd: warm route')
 
@@ -2159,7 +2178,7 @@ export function apply(ctx, config) {
     kind: 'exact',
     path: ROUTE_LOCAL,
     handler: (req, res) => {
-      void (async () => {
+      guardRoute(res, async () => {
         if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'POST') {
           sendJson(res, 405, { error: 'method-not-allowed' })
           return
@@ -2208,13 +2227,16 @@ export function apply(ctx, config) {
           return
         }
         if (action === 'remove') {
-          // A running server holds both files open on Windows, and deleting them under it
-          // would leave the row saying "ready" for a runtime that is about to be gone.
-          localRuntime?.stop()
+          // A running server holds its exe and DLLs open on Windows, and deleting them under
+          // it is `EBUSY`. `whenStopped` is the whole point: `kill` returns before the image
+          // is unmapped, so deleting in the same tick fails on a directory nobody is using
+          // by the time the error arrives.
+          const running = localRuntime
           localRuntime = undefined
           clearTimeout(localIdleTimer)
           cancelPreparation()
           localJob = undefined
+          await running?.whenStopped()
           await removeRuntime(localRoot(settings))
           const view = localView(settings, process.platform, process.arch)
           const verdict = await inspectRuntime(localRoot(settings), process.platform, process.arch, settings.localQuant)
@@ -2229,7 +2251,7 @@ export function apply(ctx, config) {
           return
         }
         sendJson(res, 400, { error: 'unknown-action' })
-      })()
+      })
     },
   }), 'dsh-ccd: local route')
 

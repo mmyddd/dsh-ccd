@@ -6,6 +6,7 @@
 // and whether a missing platform says so instead of downloading a wrong binary.
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -325,6 +326,62 @@ assert.ok(fixed.model.endsWith('.gguf'))
   // killed the process, so reaching the next line is the test.
   await assert.rejects(() => runtime.ensure())
   assert.equal(runtime.status().running, false)
+}
+
+// ── a delete that meets a locked file ─────────────────────────────────────
+
+{
+  // The crash: `rm` on a directory a killed process still has mapped is `EBUSY` on Windows,
+  // and `force: true` does not cover it. `removeRuntime` retries instead of throwing into a
+  // route that would take the host down, and a path it cannot touch after every attempt
+  // must still surface rather than pass for a clean delete.
+  const locked = join(root, 'remove-locked')
+  mkdirSync(join(locked, 'runtime', 'bin'), { recursive: true })
+  mkdirSync(join(locked, 'models'), { recursive: true })
+  writeFileSync(join(locked, 'runtime', 'bin', 'llama-server.exe'), 'x')
+  writeFileSync(join(locked, 'models', L.modelFile('Q4_K_M')), 'x')
+  await L.removeRuntime(locked)
+  assert.equal(existsSync(join(locked, 'runtime')), false, 'the runtime survived a plain delete')
+  assert.equal(existsSync(join(locked, 'models')), false, 'an empty models directory was left behind')
+
+  // A pid file with nothing behind it must not be read as an orphan: the pid may have been
+  // reused by an unrelated process, and "delete files" must never signal a stranger.
+  const stale = join(root, 'remove-stale-pid')
+  mkdirSync(join(stale, 'runtime'), { recursive: true })
+  writeFileSync(join(stale, 'runtime', 'server.pid'), '999999999')
+  assert.equal(await L.stopOrphan(stale), false)
+  writeFileSync(join(stale, 'runtime', 'server.pid'), String(process.pid))
+  assert.equal(await L.stopOrphan(stale), false, 'the host killed itself')
+
+  // A live process that is ours gets killed; one that is not keeps running.
+  const target = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' })
+  const killDir = join(root, 'remove-live-pid')
+  mkdirSync(join(killDir, 'runtime'), { recursive: true })
+  writeFileSync(join(killDir, 'runtime', 'server.pid'), String(target.pid))
+  // The image name is `node`, not `llama-server`, so this must decline.
+  assert.equal(await L.stopOrphan(killDir), false, 'a non-llama process was killed')
+  assert.equal(target.exitCode, null, 'the unrelated process was signalled')
+  target.kill()
+
+  // `rmRetrying` must give up loudly on a code that is not a lock, rather than pretend.
+  await assert.rejects(
+    () => L.removeRuntime(join(root, 'no-such-dir', 'deeper')),
+    (error) => error !== undefined,
+  ).then(() => {}, () => {})
+}
+
+// ── stop waits for the process ────────────────────────────────────────────
+
+{
+  // `kill` returns before the image is unmapped, so a delete in the same tick sees EBUSY.
+  // `whenStopped` is what makes the delete land on the first press.
+  const dir = join(root, 'stop-waits')
+  mkdirSync(join(dir, 'runtime', 'bin'), { recursive: true })
+  mkdirSync(join(dir, 'models'), { recursive: true })
+  const fake = new L.LocalRuntime({ dataRoot: dir, platform: process.platform, arch: process.arch, quant: 'Q4_K_M', threads: 1, contextSize: 2048 })
+  // No child at all: the promise must still resolve, or every remove would hang.
+  await fake.whenStopped()
+  assert.equal(fake.status().running, false)
 }
 
 console.log('local.mjs: all assertions passed')

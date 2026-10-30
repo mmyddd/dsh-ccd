@@ -113,6 +113,9 @@ ccd 的每一项可调能力都在这里：
 - **端口是现取的**：`net.createServer().listen(0)` 拿一个空闲端口再交给 `llama-server`，不写死 `8080`。
 - **模型闲置会卸载**（`localIdleSec`）。一个 GB 的权重常驻没有道理。
 - **能删干净，也只删自己的**。卡片上的「删除文件」会停掉进程、丢掉任务、删掉 `runtime/` 与所有自己下过的 GGUF，然后按磁盘重新判定一次状态。判据是文件名白名单（`QUANTS` 里那些），不是 `.gguf` 后缀：`localDataRoot` 指向一个已有目录时，你自己放进去的 GGUF 既不会被列进「盘上有哪些量化」，也不会被删。
+- **删除要等进程真的走开**。Windows 上 `child.kill()` 就是 `TerminateProcess`：它返回时镜像还没 unmap，紧接着删目录必得 `EBUSY`，而 `rm(..., {force:true})` 只饶过「路径不存在」，不饶过「被占用」。「删除文件」因此先 `await whenStopped()`（等 `exit`，最多 500 ms），再进删除；`removeRuntime` 自己也会对 `EBUSY`/`EPERM`/`ENOTEMPTY`/`EACCES` 退避重试 6 次，其它错误照旧往上抛 —— 权限问题是真的问题，吞掉只会报告一次没发生的干净删除。
+- **跨重启的遗留进程要能找回来**。宿主崩掉时 teardown 不会跑，`llama-server` 继续占着自己的 exe 和权重，下一次「删除文件」就会撞在别人手里。起进程时把 pid 写进 `runtime/server.pid`，删之前先用 `tasklist` 确认那个 pid 现在的镜像名确实以 `llama-server` 开头再 kill（pid 会被复用，绝不误杀陌生人）；`exit` 时清掉这个文件。
+- **路由出错不能带走宿主**。六条路由的异步体统一走 `guardRoute`：异常变成 `500 {"error":"route-failed", message}`，已经发过响应头就 `destroy`，绝不留一个 unhandled rejection —— 在这个宿主里那就是 `fatal load failure`，读者会连会话一起丢掉。页面对应的 `actLocal` 不再把失败吞成 `undefined`，卡片会把宿主给的 `message` 显示出来。
 - **起不来要吵架，不能沉默**。文件被删掉而 `writer` 还是 `local` 时，`spawn` 找不到 exe —— 那是一个异步 `error` 事件，没人听就是未捕获异常，整个宿主会跟着退出（`crash-*-host.log` 里记着 `spawn ... llama-server.exe ENOENT` 然后 `fatal uncaught exception`）。所以起进程前先 stat 一次 exe 与权重（缺了抛 `NOT_PREPARED`，页面显示「转述失败: the local runtime is not prepared…」），并且无论是否预检都挂上 `error` 监听器把失败记进 `this.failure`，由 `waitForHealth` 当成启动失败抛出去。
 - **本地不做关思考协商**：那条协商是给会拒 `reasoningEffort` 的 API 用的，本地模型走 `chat_template_kwargs.enable_thinking: false`，被模板忽略也就正常回答了。
 
@@ -212,7 +215,7 @@ node test/settings.mjs
 | `/dsh-ccd/warm` | POST | `{sessionId, text, retry?}`：交上某一行历史思考的原文，Host 当场切段转述并写盘（没存过时），然后连同该会话已有的笔记一起返回。`retry: true` 表示这一块点过重试：丢弃已切段、按原文重切 |
 | `/dsh-ccd/locale` | POST | 页面启动时上报浏览器语言，供 `language: auto` 的随流转述使用 |
 | `/dsh-ccd/local` | GET | 本地模型的准备状态：阶段、步骤列表、字节进度、失败原因、估算是多少、数据目录在哪。纯读，页面随便轮 |
-| `/dsh-ccd/local` | POST | `{action}`：`prepare` 开始下载、`cancel` 取消（已下好的保留）、`stop` 卸载权重、`remove` 停进程并删掉已下载的文件 |
+| `/dsh-ccd/local` | POST | `{action}`：`prepare` 开始下载、`cancel` 取消（已下好的保留）、`stop` 卸载权重、`remove` 先等进程退出再删掉已下载的文件（含跨重启遗留的 `llama-server`） |
 
 `remove` 之后不必刷新：响应里的 `ready`/`missing` 是按磁盘重新判定的，所以删除按钮当场消失。`missing` 是 `inspectRuntime` 的结果（`runtime`/`model` 各一项），卡片用它判断"盘上还有东西可以删"——一个失败后留下的 `runtime/` 目录也算，那正是最想回收空间的时候。
 

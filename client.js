@@ -958,14 +958,24 @@ window.__ModuleLoader__.load({
         .catch(() => undefined)
     }
 
+    /**
+     * One action on the local writer.
+     *
+     * A refusal has to arrive as data, not as `undefined`: the difference between "the Host
+     * said no" and "nothing happened" is the whole difference between a reader trying again
+     * and a reader concluding the button is broken.
+     */
     function actLocal(action) {
       return fetch(LOCAL_ROUTE, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ action }),
       })
-        .then((response) => (response.ok ? response.json() : undefined))
-        .catch(() => undefined)
+        .then((response) => (response.ok ? response.json() : response.json().then(
+          (body) => ({ failed: typeof body?.message === 'string' && body.message !== '' ? body.message : `HTTP ${response.status}` }),
+          () => ({ failed: `HTTP ${response.status}` }),
+        )))
+        .catch((error) => ({ failed: error instanceof Error ? error.message : String(error) }))
     }
 
     /** `unprepared` / `cancelled` / `failed` are the states a press can start from. */
@@ -1100,6 +1110,7 @@ window.__ModuleLoader__.load({
       const [open, setOpen] = React.useState(false)
       const [source, setSource] = React.useState('')
       const [busy, setBusy] = React.useState(false)
+      const [actionError, setActionError] = React.useState('')
 
       // Preparation runs on the Host, so the page cannot own the state: it polls. The
       // interval follows what it last saw — fast while bytes are moving, slow when idle.
@@ -1108,7 +1119,10 @@ window.__ModuleLoader__.load({
         let live = true
         const tick = () => {
           loadLocal().then((value) => {
-            if (live && value !== undefined) setView(value)
+            if (!live || value === undefined) return
+            setView(value)
+            // A poll that works means whatever the last action complained about is over.
+            setActionError('')
           })
         }
         tick()
@@ -1139,8 +1153,13 @@ window.__ModuleLoader__.load({
 
       const run = (action) => {
         setBusy(true)
+        setActionError('')
         actLocal(action)
           .then((value) => {
+            if (value?.failed !== undefined) {
+              setActionError(value.failed)
+              return
+            }
             if (value !== undefined) setView(value)
           })
           .finally(() => setBusy(false))
@@ -1295,6 +1314,9 @@ window.__ModuleLoader__.load({
           : null,
         phase === 'failed' && (preparation?.error ?? '') !== ''
           ? h('p', { key: 'err', className: 'dccd-prep-error', role: 'alert' }, preparation.error)
+          : null,
+        actionError !== ''
+          ? h('p', { key: 'action-err', className: 'dccd-prep-error', role: 'alert' }, actionError)
           : null,
         h('small', { key: 'root', className: 'dccd-metric dccd-prep-root' }, view?.dataRoot ?? ''),
       ])

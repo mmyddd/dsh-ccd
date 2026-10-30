@@ -13,12 +13,12 @@
 // Everything here is best-effort. A missing runtime is not an error the plugin reports
 // as broken — the note writer falls back to the provider route it already had.
 
-import { spawn } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream, createWriteStream } from 'node:fs'
-import { mkdir, readdir, readFile, rename, rm, stat } from 'node:fs/promises'
+import { mkdir, readdir, readFile, readlink, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { inflateRawSync } from 'node:zlib'
 
 /** llama.cpp build this plugin's manifest pins. */
@@ -348,6 +348,9 @@ export function layoutOf(dataRoot, quant) {
     runtimeDir: join(dataRoot, 'runtime', 'bin'),
     modelsDir: join(dataRoot, 'models'),
     model: join(dataRoot, 'models', modelFile(quant)),
+    // Written while a server is up, so the next host — or a delete after a crash — can find
+    // a process its own `child` handle never knew about.
+    pidFile: join(dataRoot, 'runtime', 'server.pid'),
   }
 }
 
@@ -487,27 +490,61 @@ export async function prepareRuntime(config, signal, report) {
  */
 export async function removeRuntime(dataRoot) {
   const layout = layoutOf(dataRoot)
-  // The whole runtime directory, not just the exe: the zip is removed after unpacking, but
-  // a cancelled download leaves a `.part` behind and an older build leaves stale DLLs.
-  await rm(join(dataRoot, 'runtime'), { recursive: true, force: true })
+  // A server this host never started — one left behind by a crash — is still holding these
+  // files. Its pid was written while it loaded, and killing it here means the delete does
+  // not depend on the caller having remembered to stop something it has no handle for.
+  await stopOrphan(dataRoot).catch(() => {})
+  // A file still mapped by a process that is a moment from exiting is `EBUSY` on Windows,
+  // and `force: true` does not cover that: it only forgives a missing path. Retrying is
+  // what makes "delete files" work on the first press instead of the second.
+  await rmRetrying(join(dataRoot, 'runtime'), { recursive: true, force: true })
   // Every quantisation of ours, not only the currently chosen one: switching keeps the
   // previous file so two can be compared, and "delete files" is what a reader presses when
-  // they want that space back. A reader's own GGUF is not ours to delete.
-  await Promise.all(
-    (await modelsOnDisk(dataRoot)).map((name) => rm(join(layout.modelsDir, name), { force: true }).catch(() => {})),
-  )
+  // they want that space back. A reader's own GGUF is not ours to delete. A locked weight
+  // file is retried rather than skipped: silently leaving a gigabyte behind while claiming
+  // the space was freed is worse than an error the reader can act on.
+  const ours = await modelsOnDisk(dataRoot)
+  for (const name of ours) await rmRetrying(join(layout.modelsDir, name), { force: true })
   // Any `.part` of an interrupted download of ours. `downloadAsset` already removes its
   // own, but a killed process leaves one, and it is a gigabyte of nothing.
   const rest = await readdir(layout.modelsDir).catch(() => [])
-  await Promise.all(
-    rest
-      .filter((name) => isOwnModelFile(name.split('.gguf.')[0] + '.gguf'))
-      .map((name) => rm(join(layout.modelsDir, name), { force: true }).catch(() => {})),
-  )
-  // Removing the directory only when it is empty keeps a reader's own files next to it safe
-  // while still clearing the empty shell we created.
-  await rm(layout.modelsDir, { recursive: false, force: true }).catch(() => {})
+  for (const name of rest) {
+    if (!isOwnModelFile(name.split('.gguf.')[0] + '.gguf')) continue
+    await rmRetrying(join(layout.modelsDir, name), { force: true })
+  }
+  // `rmdir`, not `rm`: `rm` on a directory without `recursive` rejects with `EISDIR` on
+  // every platform, so the old `rm(...).catch(() => {})` here never removed anything and
+  // every delete left an empty shell behind. `rmdir` succeeds only when empty, which is
+  // exactly the guarantee wanted: a reader's own file keeps the directory alive.
+  await rmdir(layout.modelsDir).catch(() => {})
   return layout
+}
+
+/**
+ * `rm` with a few attempts spaced out for the exclusive-open window.
+ *
+ * Windows refuses to unlink a file that any process still has mapped, and a `llama-server`
+ * killed a tick ago is exactly that. `EBUSY`/`EPERM`/`ENOTEMPTY` are therefore treated as
+ * "not yet" rather than "no": everything else is rethrown, because a permission error on a
+ * path we own is a real problem and swallowing it would report a clean delete that never
+ * happened.
+ */
+async function rmRetrying(path, options) {
+  let last
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      await rm(path, options)
+      return
+    } catch (error) {
+      last = error
+      const code = error?.code
+      if (code !== 'EBUSY' && code !== 'EPERM' && code !== 'ENOTEMPTY' && code !== 'EACCES') throw error
+      await new Promise((resolve) => {
+        setTimeout(resolve, 120 * (attempt + 1))
+      })
+    }
+  }
+  throw last
 }
 
 /** Ask the OS for a port nothing is listening on, so the server never collides. */
@@ -523,6 +560,69 @@ function freePort() {
   })
 }
 
+/**
+ * The image name of a running process, or undefined when there is none.
+ *
+ * Used before killing an orphan: a pid from a file written before a crash can be reused by
+ * an unrelated process, and "delete files" must never shoot a stranger. `tasklist` is part
+ * of Windows and needs no native dependency; elsewhere `/proc` answers the same question.
+ */
+async function imageNameOf(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return undefined
+  if (process.platform === 'win32') {
+    const out = await new Promise((resolve) => {
+      execFile('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], { windowsHide: true }, (error, stdout) => {
+        resolve(error === null ? String(stdout) : '')
+      })
+    })
+    // `"llama-server.exe","1234","Console","1","12,345 K"`, or an INFO line when the pid is gone.
+    const row = out.split(String.fromCharCode(10)).map((line) => line.trim()).find((line) => line.indexOf(String.fromCharCode(34)) === 0)
+    if (row === undefined) return undefined
+    const close = row.indexOf(String.fromCharCode(34), 1)
+    return close > 1 ? row.slice(1, close) : undefined
+  }
+  // A symlink, so it must be resolved rather than read — reading would slurp the binary.
+  const target = await readlink(`/proc/${pid}/exe`).catch(() => '')
+  const trimmed = target.trim()
+  return trimmed === '' ? undefined : basename(trimmed)
+}
+
+/**
+ * Kill a server this plugin started in an earlier life.
+ *
+ * A host that died without running its teardown leaves `llama-server` holding its exe and
+ * its weights, and the next "delete files" then fails with `EBUSY` on a directory the
+ * reader believes is theirs alone. The pid file is the only handle across a restart, so it
+ * is checked against the live image name before anything is signalled.
+ *
+ * @returns whether a process was actually killed.
+ */
+export async function stopOrphan(dataRoot) {
+  const layout = layoutOf(dataRoot)
+  const raw = await readFile(layout.pidFile, 'utf8').catch(() => '')
+  const pid = Number.parseInt(raw.trim(), 10)
+  if (!Number.isFinite(pid) || pid <= 0) return false
+  if (pid === process.pid) return false
+  const image = await imageNameOf(pid)
+  if (image === undefined) return false
+  if (!image.toLowerCase().startsWith('llama-server')) return false
+  try {
+    process.kill(pid)
+  } catch {
+    return false
+  }
+  return true
+}
+
+/**
+ * How long to wait for a killed server to release its files.
+ *
+ * TerminateProcess is immediate but the loader unmaps the image a moment later; a delete
+ * that starts in the same tick sees `EBUSY`. Half a second covers it without stalling the
+ * button when the process is already gone.
+ */
+const STOP_GRACE_MS = 500
+
 /** Split a chat template's rendered prompt back out — llama-server does it itself. */
 export class LocalRuntime {
   constructor(config) {
@@ -532,6 +632,7 @@ export class LocalRuntime {
     this.ready = false
     this.starting = undefined
     this.failure = undefined
+    this.gone = undefined
     this.log = []
   }
 
@@ -588,12 +689,21 @@ export class LocalRuntime {
       '--no-webui',
       '--no-warmup',
     ]
+    // A server left behind by a crash still holds its exe and its weights, so the delete
+    // button would meet `EBUSY` on files the reader asked to be gone. The pid file is the
+    // only handle that survives a restart, and it is written the moment the handle exists.
+    await stopOrphan(this.config.dataRoot)
     const child = spawn(exe, args, {
       cwd: layout.runtimeDir,
       windowsHide: true,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     this.child = child
+    // Written even before the health check: a process that hangs while loading also blocks
+    // the delete, and a hang is exactly the case where nothing else can be asked.
+    if (child.pid !== undefined) {
+      await writeFile(layout.pidFile, String(child.pid), 'utf8').catch(() => {})
+    }
     this.log = []
     const remember = (chunk) => {
       for (const line of String(chunk).split(/\r?\n/)) {
@@ -621,6 +731,8 @@ export class LocalRuntime {
       if (this.child === child) this.child = undefined
       this.port = 0
       this.log.push(`llama-server exited with code ${String(code)}`)
+      // Best effort: if the host is dying too, the file is what the next start cleans up.
+      void rm(layout.pidFile, { force: true }).catch(() => {})
     })
     try {
       await this.waitForHealth(signal)
@@ -708,16 +820,39 @@ export class LocalRuntime {
     }
   }
 
+  /**
+   * Ask the server to go away.
+   *
+   * Fire and forget, because callers like the idle timer only want it gone eventually.
+   * `kill` on Windows is TerminateProcess: it returns before the process has actually
+   * released its handles, and until it does the exe's directory cannot be removed. That is
+   * why `whenStopped` exists and why deleting files goes through it.
+   */
   stop() {
     const child = this.child
     this.child = undefined
     this.ready = false
     this.port = 0
+    this.gone = undefined
     if (child === undefined) return
+    // `exit` fires when the process is reaped. `close` fires after its stdio is drained,
+    // which is later still; Windows keeps the image mapped until the process object is
+    // released, so waiting on `exit` plus a short grace is the part that matters.
+    this.gone = new Promise((resolve) => {
+      const done = () => resolve()
+      child.once('exit', done)
+      setTimeout(done, STOP_GRACE_MS).unref?.()
+    })
     try {
       child.kill()
     } catch {
       // A process that already exited is not a failure to report.
     }
+  }
+
+  /** Stop, then wait until the process is gone (or the grace period runs out). */
+  async whenStopped() {
+    this.stop()
+    await this.gone
   }
 }
