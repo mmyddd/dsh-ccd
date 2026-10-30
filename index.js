@@ -880,8 +880,31 @@ function touchLocalIdle(settings) {
  * One JSON object rather than a chunk stream: a forty-token answer is buffered by the
  * server anyway, and this removes partial-frame handling from the whole path.
  */
+/** Everything `LocalRuntime` bakes in at construction and cannot change afterwards. */
+function runtimeSignature(config) {
+  return [config.dataRoot, config.quant, config.threads, config.contextSize].join(String.fromCharCode(0))
+}
+
 async function localNote(settings, set, body, signal, maxTokens) {
-  if (localRuntime === undefined) localRuntime = new LocalRuntime(localConfig(settings))
+  const config = localConfig(settings)
+  // The runtime freezes its config when it is built, so a rung the reader picked after the
+  // first note would otherwise keep loading whatever file was current back then — and once
+  // that file was deleted the writer would keep asking for it. Rebuilding is the honest
+  // move: the old process is holding a file the settings no longer name.
+  if (localRuntime !== undefined && localRuntime.signature !== runtimeSignature(config)) {
+    const stale = localRuntime
+    localRuntime = undefined
+    clearTimeout(localIdleTimer)
+    // Not awaited: the note about to be written must not wait on a process that is only
+    // being let go of, and `stop` already detaches it before the kill.
+    void stale.whenStopped()
+  }
+  if (localRuntime === undefined) {
+    localRuntime = new LocalRuntime(config)
+    // Recorded next to the runtime rather than recomputed from the settings later: the two
+    // have to be compared, and a value read back from the settings would always agree.
+    localRuntime.signature = runtimeSignature(config)
+  }
   await localRuntime.ensure(signal)
   touchLocalIdle(settings)
   return localRuntime.complete(

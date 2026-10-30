@@ -424,4 +424,32 @@ return readSpeed`)()
   assert.match(src.slice(viewFrom, viewTo), /target: job\?\.target/, 'the view does not report the job target')
 }
 
+{
+  // A runtime bakes its config in at construction, so the run that writes the next note has
+  // to notice when the settings name a different file, a different thread count, or a
+  // different context. Getting this wrong is how the writer kept asking for a deleted Q8_0
+  // after the reader had saved Q4_K_S.
+  const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  const from = src.indexOf('function runtimeSignature')
+  const to = src.indexOf('async function localNote', from)
+  assert.ok(from > 0 && to > from, 'could not locate runtimeSignature in index.js')
+  const signature = new Function(`${src.slice(from, to)}
+return runtimeSignature`)()
+  const base = { dataRoot: 'r', quant: 'Q4_K_S', threads: 8, contextSize: 8192 }
+  assert.equal(signature(base), signature({ ...base }), 'the same settings did not compare equal')
+  assert.notEqual(signature(base), signature({ ...base, quant: 'Q8_0' }), 'a rung change went unnoticed')
+  assert.notEqual(signature(base), signature({ ...base, threads: 4 }), 'a thread change went unnoticed')
+  assert.notEqual(signature(base), signature({ ...base, contextSize: 4096 }), 'a context change went unnoticed')
+  assert.notEqual(signature(base), signature({ ...base, dataRoot: 'elsewhere' }), 'a data root change went unnoticed')
+  // Fields must not run together: 'r' + null + 'Q4_K_S' is not the same root as 'r'.
+  const glued = { dataRoot: 'r' + String.fromCharCode(0) + 'Q4_K_S', quant: 'x', threads: 1, contextSize: 1 }
+  const clean = { dataRoot: 'r', quant: 'Q4_K_S', threads: 1, contextSize: 1 }
+  assert.notEqual(signature(glued), signature(clean), 'the separator let two settings collide')
+
+  // And the call site has to use it, or the function above is decoration.
+  const note = src.slice(to, src.indexOf('async function writeNote', to))
+  assert.match(note, /localRuntime\.signature !== runtimeSignature\(config\)/, 'localNote does not compare signatures')
+  assert.match(note, /localRuntime\.signature = runtimeSignature\(config\)/, 'localNote does not record the signature')
+}
+
 console.log('local.mjs: all assertions passed')
