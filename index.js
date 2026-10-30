@@ -730,6 +730,9 @@ function localView(settings, platform, arch) {
     },
     ready: runtime?.ready === true,
     port: runtime?.port ?? 0,
+    // The artifacts a job in flight is actually fetching, when that differs from what the
+    // settings now say. The page polls this to name the download honestly after a reload.
+    target: job?.target,
     // The last measured decode rate, or undefined before the first note. Not persisted:
     // it describes this process on this machine.
     speed: runtime?.speed ?? undefined,
@@ -755,6 +758,10 @@ function localStep(job, kind, patch) {
 async function runPreparation(settings, platform, arch) {
   const controller = new AbortController()
   const job = {
+    // Recorded rather than re-read from the settings later: the profile can be changed
+    // while a download runs, and a job that re-read it would report a file it is not
+    // fetching.
+    target: { quant: settings.localQuant },
     phase: 'checking',
     steps: [],
     startedAt: Date.now(),
@@ -824,6 +831,19 @@ async function runPreparation(settings, platform, arch) {
       if (step.status === 'running') step.status = 'failed'
     }
   }
+}
+
+/**
+ * Resolve a press into the settings that press meant.
+ *
+ * The button does not send the whole profile; it sends only what the reader had selected.
+ * That matters because the form's choice is not the profile's choice until it is saved, and
+ * a reload resets the form to the profile — so a press made after one would otherwise
+ * download whatever the profile said rather than what is on screen.
+ */
+function prepareTarget(settings, payload) {
+  const asked = typeof payload?.quant === 'string' && payload.quant !== '' ? payload.quant : settings.localQuant
+  return { ...settings, localQuant: quantName(asked) }
 }
 
 /** Start preparation unless one is already running. */
@@ -2215,8 +2235,26 @@ export function apply(ctx, config) {
         }
         const action = typeof payload.action === 'string' ? payload.action : ''
         if (action === 'prepare') {
-          const started = startPreparation(settings, process.platform, process.arch)
-          sendJson(res, 200, { ...localView(settings, process.platform, process.arch), started })
+          // The press carries what the reader had selected, because the form may not have
+          // been saved yet. The pair is written back before a byte moves: a model no
+          // setting points at is a gigabyte of nothing, since the note writer reads the
+          // profile and would fetch the chosen ladder only to run the old one.
+          const asked = prepareTarget(settings, payload)
+          const changed = asked.localQuant !== settings.localQuant
+          const store = ctx.get('settings')
+          const ns = entryId()
+          if (changed && store !== undefined && ns !== undefined) {
+            try {
+              await store.update(ns, { localQuant: asked.localQuant })
+            } catch (error) {
+              // Refusing is the honest answer: the reader asked for this rung to be the local
+              // writer, and a download we cannot record would leave a file nothing runs.
+              sendJson(res, 409, { error: 'update-rejected', message: describeFailure(error) })
+              return
+            }
+          }
+          const started = startPreparation(asked, process.platform, process.arch)
+          sendJson(res, 200, { ...localView(current(), process.platform, process.arch), started })
           return
         }
         if (action === 'cancel') {

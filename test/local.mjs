@@ -409,4 +409,19 @@ return readSpeed`)()
   assert.equal(fresh.status().speed, undefined)
 }
 
+{
+  // A job names what it was told to fetch. Re-reading the profile mid-download would let a
+  // settings change relabel a file that is already half on disk.
+  const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  const from = src.indexOf('async function runPreparation')
+  const to = src.indexOf('function startPreparation', from)
+  assert.ok(from > 0 && to > from, 'could not locate runPreparation in index.js')
+  const body = src.slice(from, to)
+  assert.match(body, /target: \{\s*quant: settings\.localQuant\s*\}/, 'the job does not record its target')
+  const viewFrom = src.indexOf('function localView')
+  const viewTo = src.indexOf('function prepareTarget', viewFrom)
+  assert.ok(viewFrom > 0 && viewTo > viewFrom, 'could not locate localView in index.js')
+  assert.match(src.slice(viewFrom, viewTo), /target: job\?\.target/, 'the view does not report the job target')
+}
+
 console.log('local.mjs: all assertions passed')

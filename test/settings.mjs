@@ -26,6 +26,9 @@ function region(from, to) {
 
 const source = [
   region('const DEFAULTS = Object.freeze({', 'const Config = z.object({'),
+  // A download press resolves through this before a byte moves, so it is checked with the
+  // rest of the name normalising rather than in the download test.
+  region('function prepareTarget', 'function startPreparation'),
   'const MIN_SEG_RUNES = 30',
   region('function val(node, fallback)', '// ── model call'),
   region('/** Whitelist + clamp a form submission', '// ── HTTP surface'),
@@ -48,7 +51,7 @@ const api = new Function(
   'quantName',
   'QUANTS',
   'quantView',
-  `${source}\nreturn { DEFAULTS, sanitizePatch, settingsOf, snapshot };`,
+  `${source}\nreturn { DEFAULTS, sanitizePatch, settingsOf, snapshot, prepareTarget };`,
 )(quantName, local.QUANTS, quantView)
 const empty = api.settingsOf({})
 
@@ -188,6 +191,32 @@ function draftOf(snapshot) {
   // Non-object input is a no-op rather than a throw: the route answers 400 for a body it
   // could not parse, and this function sits after that check.
   assert.deepEqual(api.sanitizePatch({}), {})
+}
+
+// ── a download press means what was on screen ─────────────────────────────
+
+{
+  const base = api.settingsOf({ localQuant: 'Q4_K_M' })
+
+  // The press wins over the saved profile: the form may not have been saved yet, and a
+  // reload resets it to the profile, so trusting the profile here is what once fetched the
+  // wrong file.
+  assert.equal(api.prepareTarget(base, { quant: 'Q8_0' }).localQuant, 'Q8_0')
+
+  // No payload means no opinion: the profile's rung stands.
+  assert.equal(api.prepareTarget(base, {}).localQuant, 'Q4_K_M')
+  assert.equal(api.prepareTarget(base, undefined).localQuant, 'Q4_K_M')
+  assert.equal(api.prepareTarget(base, { quant: '' }).localQuant, 'Q4_K_M')
+
+  // A name the table does not know is not obeyed and does not leak through: it resolves to
+  // the default rung, so the download can never ask for a file that has no hash pinned.
+  assert.equal(api.prepareTarget(base, { quant: 'Q9_K_XL' }).localQuant, api.DEFAULTS.localQuant)
+
+  // Everything else is carried through untouched — this function answers one question.
+  const carried = api.prepareTarget(base, { quant: 'Q4_K_S' })
+  assert.equal(carried.localThreads, base.localThreads)
+  assert.equal(carried.parallel, base.parallel)
+  assert.equal(carried.writer, base.writer)
 }
 
 console.log('settings.mjs: all assertions passed')

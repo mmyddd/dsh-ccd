@@ -101,10 +101,6 @@ window.__ModuleLoader__.load({
         localQuantPicked: '{file} on disk, about {bits} bits per weight.',
         quantSwap: 'Already on disk: {name}. Switching adds the chosen file and keeps both, so you can compare them.',
         quantImatrix: 'imatrix',
-        localSpeed: '速度',
-        localSpeedValue: '{tps} token/秒',
-        localSpeedHint: '这台机器上一次写笔记的解码速度，不含读 prompt 的时间。',
-        localSpeedNever: '还没写过笔记，写完第一条就会显示速度。',
         localSpeed: 'Speed',
         localSpeedValue: '{tps} tokens/s',
         localSpeedHint: 'Decode rate of the last note on this machine, prompt excluded.',
@@ -114,7 +110,7 @@ window.__ModuleLoader__.load({
         sourceAutoHelp: 'Uses whichever source answers first, and falls back to the others.',
         sourceManualHelp: 'Only this source is tried.',
         prepare: 'Download and prepare',
-        retryPrepare: 'Try again',
+        retryPrepare: 'Download again',
         cancelPrepare: 'Cancel',
         stopLocal: 'Unload model',
         removeLocal: 'Delete files',
@@ -241,12 +237,16 @@ window.__ModuleLoader__.load({
         localQuantPicked: '磁盘上 {file}，约每权重 {bits} 位。',
         quantSwap: '盘上已经有 {name}。换档只是把选中的那份也下下来，两份都留着，可以对比。',
         quantImatrix: 'imatrix',
+        localSpeed: '速度',
+        localSpeedValue: '{tps} token/秒',
+        localSpeedHint: '这台机器上一次写笔记的解码速度，不含读 prompt 的时间。',
+        localSpeedNever: '还没写过笔记，写完第一条就会显示速度。',
         sourceChoice: '模型下载源',
         sourceAuto: '自动选择（推荐）',
         sourceAutoHelp: '先用响应最快的源，失败时自动换别的。',
         sourceManualHelp: '只试这一个源。',
         prepare: '下载并准备',
-        retryPrepare: '重新准备',
+        retryPrepare: '重新下载',
         cancelPrepare: '取消',
         stopLocal: '卸载模型',
         removeLocal: '删除文件',
@@ -975,11 +975,11 @@ window.__ModuleLoader__.load({
      * said no" and "nothing happened" is the whole difference between a reader trying again
      * and a reader concluding the button is broken.
      */
-    function actLocal(action) {
+    function actLocal(action, extra) {
       return fetch(LOCAL_ROUTE, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action }),
+        body: JSON.stringify({ action, ...(extra ?? {}) }),
       })
         .then((response) => (response.ok ? response.json() : response.json().then(
           (body) => ({ failed: typeof body?.message === 'string' && body.message !== '' ? body.message : `HTTP ${response.status}` }),
@@ -1180,14 +1180,19 @@ window.__ModuleLoader__.load({
       const onDisk = view !== undefined && (ready || missing.length < 2 || steps.length > 0)
       const sources = Array.isArray(view?.downloadSources) ? view.downloadSources : []
       const current = steps.find((step) => step.status === 'running') ?? steps.find((step) => step.status === 'failed')
+      // The job carries its own target, and that is what the header names while it runs: a
+      // reload resets the form to the saved profile, so the picker below could disagree
+      // with the file actually arriving. The job cannot be wrong about what it is fetching.
+      const target = preparing ? view?.target : undefined
+      const targetLabel = target === undefined || target.quant === undefined ? '' : ` · ${target.quant}`
       const summary = preparing && current !== undefined
-        ? `${t('step_' + current.kind)} · ${current.totalBytes > 0 ? `${megabytes(current.receivedBytes)} / ${megabytes(current.totalBytes)} MB` : t('working')}`
+        ? `${t('step_' + current.kind)}${targetLabel} · ${current.totalBytes > 0 ? `${megabytes(current.receivedBytes)} / ${megabytes(current.totalBytes)} MB` : t('working')}`
         : t(phase === 'ready' ? 'prepReady' : phase === 'failed' ? 'prepFailed' : phase === 'cancelled' ? 'prepCancelled' : 'prepUnprepared')
 
-      const run = (action) => {
+      const run = (action, extra) => {
         setBusy(true)
         setActionError('')
-        actLocal(action)
+        actLocal(action, extra)
           .then((value) => {
             if (value?.failed !== undefined) {
               setActionError(value.failed)
@@ -1277,7 +1282,7 @@ window.__ModuleLoader__.load({
             type: 'button',
             className: 'dccd-btn dccd-primary',
             disabled: !connected || busy,
-            onClick: () => run('prepare'),
+            onClick: () => run('prepare', quant === '' ? undefined : { quant }),
           }, t(phase === 'unprepared' ? 'prepare' : 'retryPrepare'))
           : null,
         preparing && !cancellingNow(preparation)
