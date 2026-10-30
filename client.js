@@ -64,7 +64,7 @@ window.__ModuleLoader__.load({
         writerHint: 'A provider call, or a model running on this machine.',
         writerProvider: 'Configured provider',
         writerLocal: 'Local model',
-        localName: 'Bellatrix-Tiny 1.5B (Q4_K_M)',
+        localName: 'MiniCPM5 2B',
         localThreads: 'Threads',
         localThreadsHint: 'CPU threads the local server may use.',
         localContext: 'Context size',
@@ -99,7 +99,7 @@ window.__ModuleLoader__.load({
         localQuant: 'Quantisation',
         localQuantHint: 'Smaller downloads and less memory, at some cost in wording.',
         localQuantPicked: '{file} on disk, about {bits} bits per weight.',
-        quantSwap: '{name} is already downloaded. Choosing another quantisation downloads it again; the old file is replaced.',
+        quantSwap: 'Already on disk: {name}. Switching adds the chosen file and keeps both, so you can compare them.',
         quantImatrix: 'imatrix',
         sourceChoice: 'Model download source',
         sourceAuto: 'Automatic (recommended)',
@@ -196,7 +196,7 @@ window.__ModuleLoader__.load({
         writerHint: '走已配置的供应商，或者跑在这台机器上的模型。',
         writerProvider: '已配置的供应商',
         writerLocal: '本地模型',
-        localName: 'Bellatrix-Tiny 1.5B（Q4_K_M）',
+        localName: 'MiniCPM5 2B',
         localThreads: '线程数',
         localThreadsHint: '本地服务最多用几个 CPU 线程。',
         localContext: '上下文长度',
@@ -231,7 +231,7 @@ window.__ModuleLoader__.load({
         localQuant: '量化精度',
         localQuantHint: '越小下载越省、内存越少，措辞质量相应下降。',
         localQuantPicked: '磁盘上 {file}，约每权重 {bits} 位。',
-        quantSwap: '已经有 {name} 了。换一个量化会重新下载，旧文件会被替换掉。',
+        quantSwap: '盘上已经有 {name}。换档只是把选中的那份也下下来，两份都留着，可以对比。',
         quantImatrix: 'imatrix',
         sourceChoice: '模型下载源',
         sourceAuto: '自动选择（推荐）',
@@ -1061,9 +1061,10 @@ window.__ModuleLoader__.load({
       if (list.length === 0) return null
       const chosen = list.find((quant) => quant.name === value) ?? list[0]
       const saved = Array.isArray(installed) ? installed : []
-      // Only say something when what is on disk differs from what is chosen: the common
-      // case is one file matching the selection, and a note about it is noise.
-      const other = saved.find((name) => name !== value)
+      // Switching keeps the previous file, so several can be on disk at once and naming
+      // them is the point: it is how a reader knows two files are already there to compare
+      // without downloading again.
+      const others = saved.filter((name) => name !== chosen?.name)
       return h('div', { className: 'dccd-quant' }, [
         h('label', { key: 'label' }, [
           h('span', { key: 'name' }, t('localQuant')),
@@ -1075,14 +1076,14 @@ window.__ModuleLoader__.load({
             onChange: (event) => onChange(event.target.value),
             'aria-label': t('localQuant'),
           }, list.map((quant) => h('option', { key: quant.name, value: quant.name },
-            `${quant.name} · ${gigabytes(quant.bytes)} GB${quant.imatrix ? ` · ${t('quantImatrix')}` : ''}`))),
+            `${quant.name} · ${gigabytes(quant.bytes)} GB${quant.imatrix === true ? ` · ${t('quantImatrix')}` : ''}`))),
         ]),
         h('small', { key: 'help', className: 'dccd-metric' },
           chosen === undefined
             ? t('localQuantHint')
-            : t('localQuantPicked', { file: `${gigabytes(chosen.bytes)} GB`, bits: String(chosen.bits) })),
-        other !== undefined && canPrepare(props.phase ?? '')
-          ? h('small', { key: 'swap', className: 'dccd-metric dccd-swap' }, t('quantSwap', { name: other }))
+            : t('localQuantPicked', { file: chosen.file ?? chosen.name, bits: String(chosen.bits) })),
+        others.length > 0
+          ? h('small', { key: 'swap', className: 'dccd-metric dccd-swap' }, t('quantSwap', { name: others.join('、') }))
           : null,
       ])
     }

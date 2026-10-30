@@ -32,15 +32,24 @@ const source = [
   region('function snapshot(settings, entryId)', '// ── warm notes'),
 ].join('\n')
 
-// The sliced regions call two helpers that live at module scope in `index.js`: the
-// quantisation normaliser and the pinned table `snapshot()` exposes to the page.
+// The sliced regions call helpers that live at module scope in `index.js`: the
+// quantisation normaliser, the pinned table, and the projection both the form and the
+// local-model route serialise.
 const local = await import('../local.js')
 const quantName = (value) => local.quantFor(value).name
+const quantView = (quant) => ({
+  name: quant.name,
+  file: quant.file,
+  bytes: quant.bytes,
+  bits: quant.bits,
+  imatrix: quant.imatrix === true,
+})
 const api = new Function(
   'quantName',
   'QUANTS',
+  'quantView',
   `${source}\nreturn { DEFAULTS, sanitizePatch, settingsOf, snapshot };`,
-)(quantName, local.QUANTS)
+)(quantName, local.QUANTS, quantView)
 const empty = api.settingsOf({})
 
 /** What the settings page sends: `draftOf(snapshot)` over the client's own key list. */

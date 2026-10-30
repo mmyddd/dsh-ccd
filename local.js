@@ -25,21 +25,25 @@ import { inflateRawSync } from 'node:zlib'
 const LLAMA_TAG = 'b12015'
 const LLAMA_BASE = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}`
 
-/** The model: a 1.5B Qwen2 reasoning distil, in the quantisation the reader picks. */
-const MODEL_STEM = 'Bellatrix-Tiny-1.5B-R1'
+/** The model: a 2B Qwen-lineage build, in the quantisation and fine-tune the reader picks. */
+const MODEL_FAMILY = 'MiniCPM5-2B'
 
 /**
- * Two repositories, because the small quants deserve an importance matrix.
+ * Two repositories, holding two different fine-tunes of the same base.
  *
- * At 2–4 bits the choice of which weights to protect matters more than the bit count, so
- * everything up to 4 bits comes from the `i1` (imatrix) build and everything above it comes
- * from the plain one — that is where the calibration stops paying for itself. Each entry
- * carries its own repository and exact file name rather than deriving them from the quant
- * name, because the `i1` files are named differently and a wrong URL is a 404 the reader
- * has to interpret.
+ * `heretic` is the abliterated one: same size, looser refusals. `sharp` is the plain
+ * MiniCPM5 quantised with an importance matrix (`MiniCPM5-2B-cyber.imatrix.gguf` sits next
+ * to the quants), which buys accuracy at the same bit count.
+ *
+ * The default and the top end come from `heretic`; the ladder in between comes from
+ * `sharp`. That is a deliberate split rather than an accident of availability: the two
+ * ends are the rungs a reader actually settles on, and the middle rungs benefit most from
+ * the calibration. Each entry names its own repository and exact file, because the two
+ * repositories use different naming schemes and a derived URL is a 404 the reader has to
+ * interpret.
  */
-const MODEL_REPO = 'mradermacher/Bellatrix-Tiny-1.5B-R1-GGUF'
-const MODEL_REPO_I1 = 'mradermacher/Bellatrix-Tiny-1.5B-R1-i1-GGUF'
+const REPO_HERETIC = 'Abiray/MiniCPM5-2B-heretic-abliterated-GGUF'
+const REPO_SHARP = 'peculiar-ragdoll/Sharp-MiniCPM5-2B-GGUF'
 
 /**
  * Every quantisation offered, smallest first.
@@ -49,20 +53,25 @@ const MODEL_REPO_I1 = 'mradermacher/Bellatrix-Tiny-1.5B-R1-i1-GGUF'
  * suffix the file uses and the value stored in the profile, so a saved choice stays
  * readable in `cordis.patch.yml`.
  *
- * `bits` is the approximate bits per weight — used only to explain the trade-off, never to
- * compute anything, because the real size is the pinned `bytes`.
+ * `bits` is the bits per weight, computed from the real tensor count (2 516 756 480
+ * weights) rather than guessed from the label — used only to explain the trade-off, never
+ * to compute anything, because the real size is the pinned `bytes`.
+ *
+ * `imatrix` says whether the file was quantised against an importance matrix; the card
+ * marks those rows, because two files of nearly the same size are not the same model.
+ * `variant` records which fine-tune a row is — tests assert the split, the UI does not
+ * show it: a reader picking by number does not need a name for the repository.
  */
 export const QUANTS = [
-  { name: 'Q2_K', repo: MODEL_REPO_I1, file: `${MODEL_STEM}.i1-Q2_K.gguf`, bytes: 676305600, sha256: '3b5a3e572097712195ca9490df0eb643b505174c4ef0bc2527f5abbb8bad0b62', bits: 2.6 },
-  { name: 'Q3_K_S', repo: MODEL_REPO_I1, file: `${MODEL_STEM}.i1-Q3_K_S.gguf`, bytes: 760945344, sha256: '6a28cf9a2e3f2d62ad2402dabb1e676aed8bca83729e929094588d6348917d56', bits: 3.4 },
-  { name: 'IQ4_XS', repo: MODEL_REPO_I1, file: `${MODEL_STEM}.i1-IQ4_XS.gguf`, bytes: 895732416, sha256: '3c9244a3d4cfc80388f4214331c2701c89c7b6d4f37d42a0b60cf39156f10dd5', bits: 4.2 },
-  { name: 'Q4_K_S', repo: MODEL_REPO_I1, file: `${MODEL_STEM}.i1-Q4_K_S.gguf`, bytes: 940313280, sha256: 'b8b86c3f34b2c65687596ec9e2e12a9d4fb46af14fd0c47a79b3a68d5549aa69', bits: 4.5 },
-  { name: 'Q4_K_M', repo: MODEL_REPO_I1, file: `${MODEL_STEM}.i1-Q4_K_M.gguf`, bytes: 986049216, sha256: '57a4bc209178d4f149daec0cf049c03302c65999fe2aabdd9f2d0561f600a8a4', bits: 4.8 },
-  { name: 'Q5_K_M', repo: MODEL_REPO, file: `${MODEL_STEM}.Q5_K_M.gguf`, bytes: 1125050816, sha256: '438f0c4de27e150e5ebc5e0a98421d7c6e04fc40930911e8fb8294a40ef213df', bits: 5.5 },
-  { name: 'Q8_0', repo: MODEL_REPO, file: `${MODEL_STEM}.Q8_0.gguf`, bytes: 1646573504, sha256: '84b3687a0ad5de0cb2f91794810467cc5c6af65d9b9f2500a03196e14c327861', bits: 8.5 },
+  { name: 'Q4_K_S', repo: REPO_SHARP, file: `Sharp-${MODEL_FAMILY}-Q4_K_S.gguf`, bytes: 1516390912, sha256: '3b28cb65323bb877543b30eb5980af5876c56b4ab5982d07d21f0e037c8d7d7f', bits: 4.82, imatrix: true, variant: 'sharp' },
+  { name: 'Q4_K_M', repo: REPO_HERETIC, file: `${MODEL_FAMILY}-heretic-abliterated-Q4_K_M.gguf`, bytes: 1561320352, sha256: '2a035020ac0a9c8b2cdd738180da957ffc87e8527b275ae542a2b9945927980b', bits: 4.96, imatrix: false, variant: 'heretic' },
+  { name: 'Q4_K_XL', repo: REPO_SHARP, file: `Sharp-${MODEL_FAMILY}-Q4_K_XL.gguf`, bytes: 1595722240, sha256: 'e75a70e0f4ccb8661461498f94759cfebb2ace1df14beac02b2a80538449c568', bits: 5.07, imatrix: true, variant: 'sharp' },
+  { name: 'Q5_K_XL', repo: REPO_SHARP, file: `Sharp-${MODEL_FAMILY}-Q5_K_XL.gguf`, bytes: 1886145024, sha256: 'e990faf2ff0ff5024ec96d90a772fcb092d48be7de903847dd2c680eeaca4d97', bits: 6.0, imatrix: true, variant: 'sharp' },
+  { name: 'Q6_K_XL', repo: REPO_SHARP, file: `Sharp-${MODEL_FAMILY}-Q6_K_XL.gguf`, bytes: 2198473216, sha256: '0722928b41fae86210ee2a78f1ba49c6eb682cd4d65ae5433d976e255ff336ca', bits: 6.99, imatrix: true, variant: 'sharp' },
+  { name: 'Q8_0', repo: REPO_HERETIC, file: `${MODEL_FAMILY}-heretic-abliterated-Q8_0.gguf`, bytes: 2679712672, sha256: '2bd4589f27e7f1f7efe0220d5348c39775744973efcbd909989e31f82d7f8efd', bits: 8.52, imatrix: false, variant: 'heretic' },
 ]
 
-/** The one every install starts on: the size/quality knee for a 1.5B. */
+/** The one every install starts on: the size/quality knee, and the abliterated tune. */
 export const DEFAULT_QUANT = 'Q4_K_M'
 
 /** Resolve a quant name to its entry, falling back to the default for anything unknown. */
@@ -367,8 +376,27 @@ export async function inspectRuntime(dataRoot, platform, arch, quant) {
   return { phase: missing.length === 0 ? 'ready' : 'unprepared', missing }
 }
 
+/**
+ * Models this plugin used to ship and no longer lists.
+ *
+ * `QUANTS` is the current offer, so a file it does not name is a file the plugin did not
+ * download — except that it did, one release ago. Those names are kept here so the old
+ * gigabyte still counts as ours: without this, switching to the new table would turn the
+ * previous default into an invisible orphan that neither the inventory reports nor
+ * "delete files" removes.
+ */
+const RETIRED = new Set([
+  'Bellatrix-Tiny-1.5B-R1.i1-Q2_K.gguf',
+  'Bellatrix-Tiny-1.5B-R1.i1-Q3_K_S.gguf',
+  'Bellatrix-Tiny-1.5B-R1.i1-IQ4_XS.gguf',
+  'Bellatrix-Tiny-1.5B-R1.i1-Q4_K_S.gguf',
+  'Bellatrix-Tiny-1.5B-R1.i1-Q4_K_M.gguf',
+  'Bellatrix-Tiny-1.5B-R1.Q5_K_M.gguf',
+  'Bellatrix-Tiny-1.5B-R1.Q8_0.gguf',
+])
+
 /** The file names this plugin itself downloads, for telling its own files apart. */
-const OURS = new Set(QUANTS.map((quant) => quant.file))
+const OURS = new Set([...QUANTS.map((quant) => quant.file), ...RETIRED])
 
 /** Whether a name in the models directory is a file this plugin put there. */
 export function isOwnModelFile(name) {
@@ -378,10 +406,12 @@ export function isOwnModelFile(name) {
 /**
  * Every GGUF this plugin downloaded that is sitting in the models directory.
  *
- * Switching quantisation leaves the previous file behind, and it is most of a gigabyte:
- * the card reports these so it can offer to remove them instead of silently keeping them.
+ * Several can be present at once, because switching quantisation keeps the previous file
+ * for comparison: the card reports them so a reader can see what the space went to and
+ * clear it in one press.
  * A reader's own GGUF is not listed — this is an inventory of what the plugin spent space
- * on, not of what the directory contains.
+ * on, not of what the directory contains. Retired models are listed: they are still ours,
+ * and the point of the list is to make taking the space back possible.
  */
 export async function modelsOnDisk(dataRoot) {
   const names = await readdir(join(dataRoot, 'models')).catch(() => [])
@@ -414,14 +444,9 @@ export async function prepareRuntime(config, signal, report) {
   const wanted = quantFor(config.quant)
   const fileName = modelFile(wanted.name)
   const modelAsset = { name: fileName, bytes: wanted.bytes, sha256: wanted.sha256 }
-  // Switching quantisation must not leave the previous file behind: it is most of a
-  // gigabyte, and the next read of `modelsOnDisk` would report it as junk to clean up.
-  // Only this plugin's own file names, so a reader's own GGUF next to it is untouched.
-  await Promise.all(
-    (await modelsOnDisk(config.dataRoot))
-      .filter((name) => name !== fileName)
-      .map((name) => rm(join(layout.modelsDir, name), { force: true }).catch(() => {})),
-  )
+  // Other quantisations already on disk are kept, not replaced: switching is how a reader
+  // compares two of them, and deleting the previous one would make every comparison a
+  // re-download. Space is given back explicitly — "delete files" removes all of ours.
   const remote = `/${wanted.repo}/resolve/main/${fileName}`
   const origins = await orderSources(remote, config.origins, config.probeTimeoutMs, signal)
   let lastFailure
@@ -465,9 +490,9 @@ export async function removeRuntime(dataRoot) {
   // The whole runtime directory, not just the exe: the zip is removed after unpacking, but
   // a cancelled download leaves a `.part` behind and an older build leaves stale DLLs.
   await rm(join(dataRoot, 'runtime'), { recursive: true, force: true })
-  // Every quantisation of ours, not only the currently chosen one: a reader who switched
-  // has two, and "delete files" is what they press when they want the space back. A
-  // reader's own GGUF is not ours to delete.
+  // Every quantisation of ours, not only the currently chosen one: switching keeps the
+  // previous file so two can be compared, and "delete files" is what a reader presses when
+  // they want that space back. A reader's own GGUF is not ours to delete.
   await Promise.all(
     (await modelsOnDisk(dataRoot)).map((name) => rm(join(layout.modelsDir, name), { force: true }).catch(() => {})),
   )

@@ -222,16 +222,30 @@ assert.ok(fixed.model.endsWith('.gguf'))
 // ── quantisations ─────────────────────────────────────────────────────────
 
 {
-  // Every name in the table must resolve to a file name, a size and a digest, and the
-  // small ones must come from the imatrix repository.
+  // Every name in the table must resolve to a file name, a size and a digest. Two tunes of
+  // the same base are on offer, so the table is checked against that split rather than
+  // against "the small ones are imatrix": sizes overlap between the two fine-tunes.
   assert.ok(L.QUANTS.length >= 5, 'the quantisation table is suspiciously short')
+  const HERETIC = 2
+  const SHARP = 4
+  assert.equal(L.QUANTS.filter((quant) => quant.variant === 'heretic').length, HERETIC)
+  assert.equal(L.QUANTS.filter((quant) => quant.variant === 'sharp').length, SHARP)
   for (const quant of L.QUANTS) {
     assert.match(quant.name, /^[A-Za-z0-9_]+$/, `${quant.name} is not a plain quant name`)
     assert.equal(L.modelFile(quant.name), quant.file, `${quant.name} does not resolve to its own file`)
     assert.equal(L.quantFor(quant.name).sha256, quant.sha256)
     assert.ok(quant.bytes > 1e8, `${quant.name} has no plausible size`)
-    assert.equal(quant.repo.endsWith('-i1-GGUF'), quant.bits <= 4.8, `${quant.name} comes from the wrong repository`)
+    assert.ok(quant.bits > 2 && quant.bits < 12, `${quant.name} has an implausible bit count`)
+    assert.ok(quant.file.endsWith('.gguf'), `${quant.name} does not point at a GGUF`)
+    // The two ends are the abliterated tune, the ladder in between is the sharp one.
+    assert.ok(['heretic', 'sharp'].includes(quant.variant), `${quant.name} has no variant`)
+    assert.equal(quant.imatrix, quant.variant === 'sharp', `${quant.name} disagrees with its repository about imatrix`)
   }
+  // The two tunes must not collide on a file name, or the inventory would conflate them.
+  assert.equal(new Set(L.QUANTS.map((quant) => quant.file)).size, L.QUANTS.length)
+  // The default and the top end come from the abliterated repository.
+  assert.equal(L.quantFor(L.DEFAULT_QUANT).variant, 'heretic')
+  assert.equal(L.quantFor(L.QUANTS.at(-1).name).variant, 'heretic')
   // Sizes increase with bits: a table where they do not is one where a name got swapped.
   const sizes = L.QUANTS.map((quant) => quant.bytes)
   assert.deepEqual(sizes, [...sizes].sort((a, b) => a - b), 'the quantisations are out of order')
@@ -243,11 +257,11 @@ assert.ok(fixed.model.endsWith('.gguf'))
   assert.equal(L.quantFor(undefined).name, L.DEFAULT_QUANT)
 
   // File name → quant name, used to report what is already on disk.
-  assert.equal(L.quantOfFile(L.modelFile('Q2_K')), 'Q2_K')
+  assert.equal(L.quantOfFile(L.modelFile(L.QUANTS[0].name)), L.QUANTS[0].name)
   assert.equal(L.quantOfFile('someone-elses.gguf'), undefined)
 
   // The estimate follows the chosen quantisation, because the download does.
-  const small = L.setupEstimate({ quant: 'Q2_K' }, 'win32', 'x64')
+  const small = L.setupEstimate({ quant: L.QUANTS[0].name }, 'win32', 'x64')
   const large = L.setupEstimate({ quant: 'Q8_0' }, 'win32', 'x64')
   assert.ok(large.recommendedDiskBytes > small.recommendedDiskBytes, 'the estimate ignores the quantisation')
 
@@ -259,14 +273,34 @@ assert.ok(fixed.model.endsWith('.gguf'))
   const ours = await L.modelsOnDisk(mixed)
   assert.deepEqual(ours, [L.modelFile('Q4_K_M')], 'the inventory is not exactly the files this plugin wrote')
 
-  // Swapping quantisations replaces the old file instead of keeping both.
+  // "Delete files" clears every quantisation of ours and nothing else. Several can be
+  // sitting there at once, because switching is how a reader compares two: keeping them is
+  // the feature, so the only thing that removes them is this explicit press.
   const swap = join(root, 'quant-swap')
   mkdirSync(join(swap, 'models'), { recursive: true })
-  writeFileSync(join(swap, 'models', L.modelFile('Q4_K_M')), 'old')
+  writeFileSync(join(swap, 'models', L.modelFile('Q4_K_M')), 'one')
+  writeFileSync(join(swap, 'models', L.modelFile('Q8_0')), 'two')
   writeFileSync(join(swap, 'models', 'someone-elses.gguf'), 'theirs')
+  assert.equal((await L.modelsOnDisk(swap)).length, 2, 'both quantisations should be inventoried')
   await L.removeRuntime(swap)
-  assert.equal(existsSync(join(swap, 'models', L.modelFile('Q4_K_M'))), false, 'the old quantisation survived')
+  assert.equal(existsSync(join(swap, 'models', L.modelFile('Q4_K_M'))), false, 'a quantisation survived the delete')
+  assert.equal(existsSync(join(swap, 'models', L.modelFile('Q8_0'))), false, 'a quantisation survived the delete')
   assert.equal(existsSync(join(swap, 'models', 'someone-elses.gguf')), true, 'a reader file was deleted')
+
+  // A model this build no longer offers is still this plugin's file. Changing the table
+  // without this would strand the previous default on disk: not reported by the
+  // inventory, and therefore not deleted by "delete files" either.
+  const RETIRED_FILE = 'Bellatrix-Tiny-1.5B-R1.i1-Q4_K_M.gguf'
+  assert.equal(L.isOwnModelFile(RETIRED_FILE), true, 'a retired model is not recognised as ours')
+  const stale = join(root, 'quant-stale')
+  mkdirSync(join(stale, 'models'), { recursive: true })
+  writeFileSync(join(stale, 'models', RETIRED_FILE), 'stale')
+  assert.deepEqual(await L.modelsOnDisk(stale), [RETIRED_FILE], 'a retired model is invisible to the inventory')
+  await L.removeRuntime(stale)
+  assert.equal(existsSync(join(stale, 'models', RETIRED_FILE)), false, 'the retired model was left behind')
+  // No current file name may collide with a retired one, or one release would delete the
+  // model another release just downloaded.
+  for (const quant of L.QUANTS) assert.notEqual(quant.file, RETIRED_FILE)
 }
 
 // ── a runtime that cannot start ───────────────────────────────────────────

@@ -657,6 +657,23 @@ let localJob
 let localIdleTimer
 
 /** The data root: the bundle patch supplies it, the Config can override it. */
+/**
+ * One row of the quantisation chooser.
+ *
+ * A shared projection rather than an inline map, because both the settings form and the
+ * local-model route serialise the same list and a divergence between them is a chooser
+ * that lies about what it will download.
+ */
+function quantView(quant) {
+  return {
+    name: quant.name,
+    file: quant.file,
+    bytes: quant.bytes,
+    bits: quant.bits,
+    imatrix: quant.imatrix === true,
+  }
+}
+
 function localRoot(settings) {
   if (settings.localDataRoot !== '') return settings.localDataRoot
   const home = process.env.DSH_HOME?.trim()
@@ -693,14 +710,10 @@ function localView(settings, platform, arch) {
     estimate: setupEstimate({ quant: settings.localQuant }, platform, arch),
     // What the client renders as a chooser; same vocabulary the voice-input page uses.
     downloadSources: MODEL_ORIGINS.slice(),
-    // Every quantisation this build can fetch, and which one is installed right now. The
-    // card groups the small ones separately, because they come from the imatrix build.
-    quants: QUANTS.map((quant) => ({
-      name: quant.name,
-      bytes: quant.bytes,
-      bits: quant.bits,
-      imatrix: quant.repo.endsWith('-i1-GGUF'),
-    })),
+    // Every quantisation this build can fetch, and which one is installed right now. Each
+    // one says which fine-tune it is, because two files of the same size are not the same
+    // model: the abliterated tune and the imatrix tune are both on offer.
+    quants: QUANTS.map(quantView),
     // What quantisation the files on disk belong to, filled in by the route: it stats the
     // directory, and `localView` is deliberately free of I/O so it can be called anywhere.
     installed: [],
@@ -1106,14 +1119,7 @@ function snapshot(settings, entryId) {
     writer: settings.writer,
     localDataRoot: settings.localDataRoot,
     localQuant: settings.localQuant,
-    quants: QUANTS.map((quant) => ({
-      name: quant.name,
-      bytes: quant.bytes,
-      bits: quant.bits,
-      // The repository differs per quant (the small ones carry an importance matrix), so
-      // the card groups by it instead of implying one model in seven sizes.
-      imatrix: quant.repo.endsWith('-i1-GGUF'),
-    })),
+    quants: QUANTS.map(quantView),
     localThreads: settings.localThreads,
     localContext: settings.localContext,
     localIdleSec: settings.localIdleSec,
