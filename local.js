@@ -623,6 +623,34 @@ export async function stopOrphan(dataRoot) {
  */
 const STOP_GRACE_MS = 500
 
+/**
+ * Decode rate from the server's own timings.
+ *
+ * `predicted_n / predicted_ms` is generation only; a client-side wall clock would also
+ * count the wait for a slot, the prompt read and whatever else the host was doing, and a
+ * number that moves with unrelated load is not a measurement of the model.
+ */
+function readSpeed(timings) {
+  if (timings === null || typeof timings !== 'object') return undefined
+  const predicted = Number(timings.predicted_n)
+  const predictedMs = Number(timings.predicted_ms)
+  const prompt = Number(timings.prompt_n)
+  const promptMs = Number(timings.prompt_ms)
+  const decode = predicted > 0 && predictedMs > 0
+    ? predicted / (predictedMs / 1000)
+    : Number(timings.predicted_per_second)
+  const prefill = prompt > 0 && promptMs > 0
+    ? prompt / (promptMs / 1000)
+    : Number(timings.prompt_per_second)
+  if (!Number.isFinite(decode) || decode <= 0) return undefined
+  return {
+    tokensPerSecond: Math.round(decode * 10) / 10,
+    promptTokensPerSecond: Number.isFinite(prefill) && prefill > 0 ? Math.round(prefill) : undefined,
+    tokens: Number.isFinite(predicted) && predicted > 0 ? predicted : undefined,
+    at: Date.now(),
+  }
+}
+
 /** Split a chat template's rendered prompt back out — llama-server does it itself. */
 export class LocalRuntime {
   constructor(config) {
@@ -634,6 +662,9 @@ export class LocalRuntime {
     this.failure = undefined
     this.gone = undefined
     this.log = []
+    // The last measured decode rate, kept in memory only: it describes this process on this
+    // machine, and a number from yesterday would be a claim about hardware.
+    this.speed = undefined
   }
 
   /** Where the server is, or undefined when it is not up. */
@@ -642,7 +673,7 @@ export class LocalRuntime {
   }
 
   status() {
-    return { running: this.ready, port: this.port, log: this.log.slice(-20) }
+    return { running: this.ready, port: this.port, speed: this.speed, log: this.log.slice(-20) }
   }
 
   /**
@@ -809,6 +840,7 @@ export class LocalRuntime {
       const text = payload?.choices?.[0]?.message?.content
       if (typeof text !== 'string') throw new Error('local model returned no text')
       const finish = payload?.choices?.[0]?.finish_reason
+      this.speed = readSpeed(payload?.timings) ?? this.speed
       return {
         text,
         thought: false,

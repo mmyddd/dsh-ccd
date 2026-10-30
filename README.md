@@ -118,6 +118,7 @@ ccd 的每一项可调能力都在这里：
 - **路由出错不能带走宿主**。六条路由的异步体统一走 `guardRoute`：异常变成 `500 {"error":"route-failed", message}`，已经发过响应头就 `destroy`，绝不留一个 unhandled rejection —— 在这个宿主里那就是 `fatal load failure`，读者会连会话一起丢掉。页面对应的 `actLocal` 不再把失败吞成 `undefined`，卡片会把宿主给的 `message` 显示出来。
 - **起不来要吵架，不能沉默**。文件被删掉而 `writer` 还是 `local` 时，`spawn` 找不到 exe —— 那是一个异步 `error` 事件，没人听就是未捕获异常，整个宿主会跟着退出（`crash-*-host.log` 里记着 `spawn ... llama-server.exe ENOENT` 然后 `fatal uncaught exception`）。所以起进程前先 stat 一次 exe 与权重（缺了抛 `NOT_PREPARED`，页面显示「转述失败: the local runtime is not prepared…」），并且无论是否预检都挂上 `error` 监听器把失败记进 `this.failure`，由 `waitForHealth` 当成启动失败抛出去。
 - **本地不做关思考协商**：那条协商是给会拒 `reasoningEffort` 的 API 用的，本地模型走 `chat_template_kwargs.enable_thinking: false`，被模板忽略也就正常回答了。
+- **速度是量出来的，不是配出来的**。卡片上那一行读的是 `llama-server` 响应的 `timings`：`predicted_n / predicted_ms`，只算生成、不含读 prompt。用客户端墙钟会连等槽位、读 prompt、宿主忙一起算进去，那样的数字跟着无关负载走，就不再是关于这个模型的测量了。没写过笔记时它说「写完第一条就会显示」而不是画一个 `0`：这是测量值，唯一诚实的空状态是讲清为什么空。它只在内存里，因为它描述的是这个进程在这台机器上。
 
 实测（i5 一类的 CPU、4 线程、8k 上下文）：模型加载约 1.3 s，一段 1500 字的推理出笔记约 2.5–5 s，质量能过输出闸门 —— 第一人称、抓要点、不重复上文。
 

@@ -384,4 +384,29 @@ assert.ok(fixed.model.endsWith('.gguf'))
   assert.equal(fake.status().running, false)
 }
 
+{
+  // The speed row is a measurement, not a setting: it must read llama.cpp's own field names
+  // and say nothing rather than guess when they are absent.
+  const src = readFileSync(new URL('../local.js', import.meta.url), 'utf8')
+  const from = src.indexOf('function readSpeed')
+  const to = src.indexOf('Split a chat template', from)
+  assert.ok(from > 0 && to > from, 'could not locate readSpeed in local.js')
+  const cut = src.lastIndexOf('/**', to)
+  const readSpeed = new Function(`${src.slice(from, cut)}
+return readSpeed`)()
+  assert.equal(readSpeed({ predicted_n: 40, predicted_ms: 2000 }).tokensPerSecond, 20)
+  assert.equal(readSpeed({ predicted_per_second: 55.5 }).tokensPerSecond, 55.5)
+  assert.equal(readSpeed({ predicted_n: 10, predicted_ms: 0 }), undefined, 'divided by a zero clock')
+  assert.equal(readSpeed({}), undefined)
+  assert.equal(readSpeed(undefined), undefined)
+  assert.equal(readSpeed({ predicted_n: 40, predicted_ms: 2000, prompt_n: 100, prompt_ms: 500 }).promptTokensPerSecond, 200)
+  // Prefill is reported separately and never mixed into the decode rate.
+  assert.notEqual(readSpeed({ predicted_n: 40, predicted_ms: 2000, prompt_n: 100, prompt_ms: 500 }).tokensPerSecond, 200)
+
+  // The rate starts unknown and survives nothing, because it describes a process.
+  const fresh = new L.LocalRuntime({ dataRoot: root, quant: 'Q4_K_M' })
+  assert.equal(fresh.speed, undefined, 'a runtime claimed a speed before writing anything')
+  assert.equal(fresh.status().speed, undefined)
+}
+
 console.log('local.mjs: all assertions passed')

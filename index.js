@@ -730,6 +730,9 @@ function localView(settings, platform, arch) {
     },
     ready: runtime?.ready === true,
     port: runtime?.port ?? 0,
+    // The last measured decode rate, or undefined before the first note. Not persisted:
+    // it describes this process on this machine.
+    speed: runtime?.speed ?? undefined,
   }
 }
 

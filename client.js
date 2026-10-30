@@ -101,6 +101,14 @@ window.__ModuleLoader__.load({
         localQuantPicked: '{file} on disk, about {bits} bits per weight.',
         quantSwap: 'Already on disk: {name}. Switching adds the chosen file and keeps both, so you can compare them.',
         quantImatrix: 'imatrix',
+        localSpeed: '速度',
+        localSpeedValue: '{tps} token/秒',
+        localSpeedHint: '这台机器上一次写笔记的解码速度，不含读 prompt 的时间。',
+        localSpeedNever: '还没写过笔记，写完第一条就会显示速度。',
+        localSpeed: 'Speed',
+        localSpeedValue: '{tps} tokens/s',
+        localSpeedHint: 'Decode rate of the last note on this machine, prompt excluded.',
+        localSpeedNever: 'No note written yet — the rate appears after the first one.',
         sourceChoice: 'Model download source',
         sourceAuto: 'Automatic (recommended)',
         sourceAutoHelp: 'Uses whichever source answers first, and falls back to the others.',
@@ -829,6 +837,8 @@ window.__ModuleLoader__.load({
 .dccd-bar-fill{height:100%;background:var(--dsw-alias-state-business-primary);transition:width .2s ease}
 .dccd-quant{display:grid;gap:6px}
 .dccd-quant label{display:grid;grid-template-columns:100px minmax(120px,280px);align-items:center;gap:12px}
+/* A read-only row: the value column keeps the same track as the pickers so the numbers line up. */
+.dccd-quant label>span:last-child{justify-self:start;font-variant-numeric:tabular-nums}
 .dccd-quant select{padding:6px 10px;border:.5px solid var(--dsw-alias-border-l1);border-radius:var(--dsw-radius-sm);background:0 0;color:inherit;font:inherit}
 .dccd-swap{color:var(--dsw-alias-state-warn-primary)}
 .dccd-source{display:grid;gap:6px}
@@ -1056,6 +1066,29 @@ window.__ModuleLoader__.load({
             ? h('small', { key: 'why', className: 'dccd-step-why' }, note)
             : null,
         ]),
+      ])
+    }
+
+    /**
+     * The measured decode rate, as a read-only row.
+     *
+     * It says "no note written yet" rather than "0" or a dash with no explanation: this is
+     * measured, not configured, so the only honest empty state is naming why it is empty.
+     */
+    function SpeedRow(props) {
+      const { t, speed } = props
+      const rate = Number(speed?.tokensPerSecond)
+      const known = Number.isFinite(rate) && rate > 0
+      return h('div', { className: 'dccd-quant' }, [
+        h('label', { key: 'label' }, [
+          h('span', { key: 'name' }, t('localSpeed')),
+          h('span', {
+            key: 'value',
+            className: 'dccd-metric',
+            'data-ccd-speed': known ? String(rate) : undefined,
+          }, known ? t('localSpeedValue', { tps: String(rate) }) : '—'),
+        ]),
+        h('small', { key: 'help', className: 'dccd-metric' }, known ? t('localSpeedHint') : t('localSpeedNever')),
       ])
     }
 
@@ -1295,6 +1328,7 @@ window.__ModuleLoader__.load({
         // The choice is a setting, not an action: the form owns it and the save button
         // writes it, exactly like every other field. The files on disk come from the Host,
         // because only it can stat them.
+        h(SpeedRow, { key: 'speed', t, speed: view?.speed }),
         h(QuantPicker, {
           key: 'quant',
           t,
