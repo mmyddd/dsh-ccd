@@ -28,6 +28,14 @@ https://github.com/mmyddd/dsh-ccd
 
 改代码时直接填本地目录（`C:/Git/dsh-ccd`）更顺手，装出来的东西等价，只是不经过拷贝、改完刷新即见。
 
+也可以直接下载打好包的 tarball（每次打 tag 发布，资产名不带版本所以链接长期有效）：
+
+```
+https://github.com/mmyddd/dsh-ccd/releases/latest/download/dsh-ccd.tgz
+```
+
+旁边有 `SHA256SUMS.txt` 可以对一下摘要。这条路跳过了 git 克隆那一段，pnpm 仍然要拉唯一那个依赖 `@deepseek-ai/schemastery`（所以「安装源」下拉在这里照样管用）。
+
 同一条路也有工具入口，写脚本或不方便点按钮时用：
 
 ```
@@ -202,6 +210,8 @@ CREATE TABLE notes (
 | `test/settings.mjs` | 设置往返：`first`/`step`/`max` 与 `streamFirst`/`streamStep`/`streamMax` 的别名、空数字框不会被存成最小值、表单真实的每个键都能存下来再读回来 |
 | `test/golden-segments.json` | 切段基准。冻结自当年与 ccd `internal/thinkhide/segment.go` 逐例对齐（402 例零差异）的那份 JS 实现，所以它替 Go 版当基准 |
 | `cordis.patch.yml` | 只 insert 一行 |
+| `.github/workflows/ci.yml` | 两个平台 × node 24：三份 `node --check`、六套测试、包内容白名单校验（`local.js` 曾漏在 `files` 外，只有真装才暴露） |
+| `.github/workflows/release.yml` | 打 `v*` tag 时先跑 CI 再发版：tag 与 manifest 版本核对、`npm pack`、版本无关的 `dsh-ccd.tgz`、`SHA256SUMS.txt`、可重复执行 |
 | `locale/{en,zh}.json` | 插件页标题与描述 |
 
 测试直接跑源码，不需要 build 也不需要 Harness：
@@ -216,6 +226,8 @@ node test/settings.mjs
 ```
 
 这几个脚本把 `index.js` / `client.js` 里的对应区段切出来、注入 stub 的 `llm` / `fetch` / storage table，所以测的是真代码而不是副本。`test/local.mjs` 更直接：它建真 zip、写真文件、算真摘要，因为要测的正是碰盘的那些部分。
+
+同一个提交要在 LF 与 CRLF 两种检出下都通过 —— 切片用的是源码里的字面标记，有的标记跨了两行。`test/store.mjs` 那个 `/**` 加换行的标记就是这样：本机 LF 过、CI 的 Windows runner 检出成 CRLF 就报 `stored-notes section not found`。所以读进源码先归一化掉 CR，别让断言跟着换行符走。
 
 路由：
 
