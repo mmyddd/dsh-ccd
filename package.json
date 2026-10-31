@@ -1,8 +1,6 @@
 {
   "name": "dsh-ccd",
   "version": "0.1.1",
-  "private": true,
-  "type": "module",
   "description": "Show the user short first-person working notes instead of the raw chain of thought, while the model keeps seeing the full reasoning",
   "license": "MIT",
   "author": "YG",
@@ -15,6 +13,7 @@
     "chain-of-thought",
     "ccd"
   ],
+  "type": "module",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -50,5 +49,19 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "~3.18.5"
+  },
+  "homepage": "https://github.com/mmyddd/dsh-ccd#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mmyddd/dsh-ccd.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mmyddd/dsh-ccd/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=24"
   }
 }
