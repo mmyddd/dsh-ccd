@@ -41,6 +41,7 @@ import {
   quantFor,
   quantOfFile,
   removeRuntime,
+  runtimeFor,
   setupEstimate,
 } from './local.js'
 
@@ -707,7 +708,10 @@ function localView(settings, platform, arch) {
     dataRoot: localRoot(settings),
     platform,
     arch,
+    // A platform with no pinned runtime has nothing to estimate: a disk figure for a
+    // download that can never start is a promise made on behalf of nobody.
     estimate: setupEstimate({ quant: settings.localQuant }, platform, arch),
+    supported: runtimeFor(platform, arch) !== undefined,
     // What the client renders as a chooser; same vocabulary the voice-input page uses.
     downloadSources: MODEL_ORIGINS.slice(),
     // Every quantisation this build can fetch, and which one is installed right now. Each
@@ -2275,6 +2279,12 @@ export function apply(ctx, config) {
               sendJson(res, 409, { error: 'update-rejected', message: describeFailure(error) })
               return
             }
+          }
+          // No pinned build means no download to start. Saying `started: true` here would
+          // leave a page waiting on steps that never appear.
+          if (runtimeFor(process.platform, process.arch) === undefined) {
+            sendJson(res, 409, { error: 'unsupported-platform', message: `${process.platform}-${process.arch} has no pinned runtime` })
+            return
           }
           const started = startPreparation(asked, process.platform, process.arch)
           sendJson(res, 200, { ...localView(current(), process.platform, process.arch), started })

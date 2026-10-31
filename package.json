@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Show the user short first-person working notes instead of the raw chain of thought, while the model keeps seeing the full reasoning",
-  "license": "AGPL-3.0",
+  "license": "MIT",
   "author": "YG",
   "keywords": [
     "dsh",
@@ -29,6 +29,7 @@
     "locale/*.json",
     "icon.svg",
     "README.md",
+    "LICENSE",
     "test/*.mjs"
   ],
   "scripts": {

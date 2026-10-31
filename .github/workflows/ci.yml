@@ -1,0 +1,74 @@
+name: CI
+
+# Every push and every pull request, plus reusable by the release workflow.
+# Two platforms because the plugin has two very different halves: the Host half reads
+# node:sqlite and node:zlib, the client half is a browser bundle.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: ${{ matrix.os }} · node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        # 24 only. The Host half imports `DatabaseSync` from node:sqlite and
+        # `zstdCompressSync` from node:zlib; node:sqlite stopped needing a flag in 23.4,
+        # but zstd landed later on the 22 line, so a 22 runner would go red on a
+        # capability this plugin legitimately needs rather than on a real defect.
+        node: [24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      # @deepseek-ai/schemastery is imported by index.js to describe the settings, and the
+      # test harnesses import it too — installing is not optional here.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Syntax check
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check index.js
+          node --check client.js
+          node --check local.js
+
+      - name: Test suites
+        run: npm test
+
+      - name: Package contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm pack --dry-run 2>&1 | tail -20
+          # `files` is a whitelist: a file missing from it ships broken only to people who
+          # install from git, never to whover runs the checkout. local.js was exactly that.
+          packed="$(npm pack --dry-run --json | node -e 'let raw="";process.stdin.on("data",d=>raw+=d).on("end",()=>{const files=JSON.parse(raw)[0].files.map(f=>f.path);process.stdout.write(files.join("\n"))})')"
+          for file in index.js client.js local.js cordis.patch.yml LICENSE; do
+            if ! printf '%s\n' "$packed" | grep -qx "$file"; then
+              echo "::error::$file is not in the package"
+              exit 1
+            fi
+          done
+          echo "all required files are in the package"

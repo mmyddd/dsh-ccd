@@ -16,10 +16,10 @@
 import { execFile, spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { createReadStream, createWriteStream } from 'node:fs'
-import { mkdir, readdir, readFile, readlink, rename, rm, rmdir, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, readlink, rename, rm, rmdir, stat, symlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { basename, dirname, join } from 'node:path'
-import { inflateRawSync } from 'node:zlib'
+import { gunzipSync, inflateRawSync } from 'node:zlib'
 
 /** llama.cpp build this plugin's manifest pins. */
 const LLAMA_TAG = 'b12015'
@@ -102,9 +102,27 @@ export function quantOfFile(name) {
 const RUNTIMES = {
   'win32-x64': {
     file: `llama-${LLAMA_TAG}-bin-win-cpu-x64.zip`,
+    archive: 'zip',
     bytes: 24574585,
     sha256: 'f3a0097934526c7c937fbe33b8352ee305aa6605cceef1744427a84686edbc48',
     exe: 'llama-server.exe',
+  },
+  // The Linux builds are published as tarballs, and unlike the zips they carry symlinks
+  // (`libllama.so.0 -> libllama.so.0.8.0`) and executable bits. A zip extractor would lose
+  // both, so `untar` is a separate path rather than a shared one.
+  'linux-x64': {
+    file: `llama-${LLAMA_TAG}-bin-ubuntu-x64.tar.gz`,
+    archive: 'tar.gz',
+    bytes: 22881053,
+    sha256: '25458e07a9eca87791b2c856bf7d1c457dcfda038d6bf2fa2bbb07f11c988ee6',
+    exe: 'llama-server',
+  },
+  'linux-arm64': {
+    file: `llama-${LLAMA_TAG}-bin-ubuntu-arm64.tar.gz`,
+    archive: 'tar.gz',
+    bytes: 18571232,
+    sha256: '60baf0984eec74722b8c396e6de549a50ebfcd6f22a8778a62df53ccd1447019',
+    exe: 'llama-server',
   },
 }
 
@@ -327,6 +345,112 @@ export async function unzip(buffer, destination) {
   return written
 }
 
+/**
+ * Unpack a tarball.
+ *
+ * Linux builds ship as `.tar.gz` and carry two things a zip cannot: symlinks
+ * (`libllama.so.0 -> libllama.so.0.8.0`) and executable bits. Both matter — the server is
+ * useless without either — so this is a separate path rather than a shared one.
+ *
+ * Every entry is written under its basename and nothing else, which is what the zip side
+ * does too: the archive puts everything in one directory, and flattening means a hostile
+ * `../../path` cannot escape. Symlinks survive only when they are relative to that same
+ * directory; an absolute target or one with a separator is dropped, because on a flattened
+ * layout it could point anywhere.
+ *
+ * @returns the names written, in archive order.
+ */
+export async function untar(buffer, destination) {
+  await mkdir(destination, { recursive: true })
+  const archive = gunzipSync(buffer)
+  const written = []
+  let cursor = 0
+  let pendingName
+  while (cursor + 512 <= archive.length) {
+    const header = archive.subarray(cursor, cursor + 512)
+    // Two zero blocks end the archive; one all-zero header is enough to stop reading.
+    if (header.every((byte) => byte === 0)) break
+    const size = tarSize(header)
+    const type = String.fromCharCode(header[156])
+    const rawName = tarName(header)
+    const body = archive.subarray(cursor + 512, cursor + 512 + size)
+    cursor += 512 + Math.ceil(size / 512) * 512
+
+    // Extension headers describe the entry that follows rather than being one.
+    if (type === 'L') {
+      pendingName = cstr(body.toString('utf8'))
+      continue
+    }
+    if (type === 'x') {
+      const text = body.toString('utf8')
+      for (const line of text.split(String.fromCharCode(10))) {
+        if (line.startsWith('path=')) pendingName = line.slice('path='.length)
+      }
+      continue
+    }
+    if (type === 'g' || type === 'K') continue
+
+    const name = pendingName ?? rawName
+    pendingName = undefined
+    const base = name.split('/').join(String.fromCharCode(92)).split(String.fromCharCode(92)).filter((part) => part !== '').pop() ?? ''
+    if (base === '' || base.startsWith('.')) continue
+
+    if (type === '5') {
+      await mkdir(join(destination, base), { recursive: true })
+      continue
+    }
+    // A hard link names another entry; flattened, that is either a copy or nothing.
+    if (type === '1') continue
+    const target = join(destination, base)
+    if (type === '2') {
+      const link = cstr(tarName(header, 157, 257))
+      // Only a plain sibling survives flattening. An absolute target or one with a
+      // separator would point somewhere else entirely once the layout is flat.
+      if (link === '' || link.startsWith('/') || link.includes('/') || link.includes(String.fromCharCode(92))) continue
+      await rm(target, { force: true })
+      await symlink(link, target)
+      written.push(base)
+      continue
+    }
+    // The mode matters here and not on the zip side: these are executables and shared
+    // libraries, so the archive's own bits decide whether they can be loaded at all.
+    const mode = (Number.parseInt(cstr(header.toString('utf8', 100, 108)).trim() || '644', 8) & 0o777) | 0o600
+    await new Promise((resolve, reject) => {
+      const sink = createWriteStream(target, { mode })
+      sink.once('error', reject)
+      sink.end(body, () => resolve())
+    })
+    written.push(base)
+  }
+  return written
+}
+
+/** A header field is NUL-terminated, and only the first NUL means anything. */
+function cstr(text) {
+  const end = text.indexOf(String.fromCharCode(0))
+  return end === -1 ? text : text.slice(0, end)
+}
+
+/** Read the `size` field: octal, or base-256 when the high bit marks a large value. */
+function tarSize(header) {
+  const field = header.subarray(124, 136)
+  if ((field[0] & 0x80) !== 0) {
+    let value = 0
+    for (const byte of field.subarray(1)) value = value * 256 + byte
+    return value
+  }
+  const text = cstr(header.toString('utf8', 124, 136)).trim()
+  return text === '' ? 0 : Number.parseInt(text, 8)
+}
+
+/** A name, with the `ustar` prefix prepended when the header is a long-name one. */
+function tarName(header, start = 0, end = 100) {
+  const raw = cstr(header.toString('utf8', start, end))
+  if (start !== 0) return raw
+  const prefix = cstr(header.toString('utf8', 345, 500))
+  return prefix === '' ? raw : `${prefix}/${raw}`
+}
+
 function findEndOfCentralDirectory(buffer) {
   for (let index = buffer.length - 22; index >= 0; index -= 1) {
     if (buffer.readUInt32LE(index) === 0x06054b50) return index
@@ -344,7 +468,10 @@ function findEndOfCentralDirectory(buffer) {
 export function layoutOf(dataRoot, quant) {
   return {
     root: dataRoot,
-    runtimeZip: join(dataRoot, 'runtime', 'llama.zip'),
+    // The archive is only ever a scratch file: it is downloaded, unpacked and removed, so
+    // it is named after whatever the platform's build is published as rather than a fixed
+    // name. Its folder is kept separate because `runtimeDir` holds the unpacked files.
+    runtimeRoot: join(dataRoot, 'runtime'),
     runtimeDir: join(dataRoot, 'runtime', 'bin'),
     modelsDir: join(dataRoot, 'models'),
     model: join(dataRoot, 'models', modelFile(quant)),
@@ -434,13 +561,16 @@ export async function prepareRuntime(config, signal, report) {
   const zipUrl = `${LLAMA_BASE}/${runtime.file}`
   const haveRuntime = await stat(join(layout.runtimeDir, runtime.exe)).then((info) => info.isFile() && info.size > 0).catch(() => false)
   if (!haveRuntime) {
-    const zipAsset = { name: runtime.file, bytes: runtime.bytes, sha256: runtime.sha256 }
-    await downloadAsset(zipAsset, layout.runtimeZip, zipUrl, signal, (progress) => {
+    const archiveAsset = { name: runtime.file, bytes: runtime.bytes, sha256: runtime.sha256 }
+    const archivePath = join(layout.runtimeRoot, basename(runtime.file))
+    await downloadAsset(archiveAsset, archivePath, zipUrl, signal, (progress) => {
       report({ phase: progress.phase, step: 'runtime', resource: runtime.file, receivedBytes: progress.receivedBytes, totalBytes: progress.totalBytes })
     })
     report({ phase: 'checking', step: 'runtime', detail: 'unpack' })
-    await unzip(await readFile(layout.runtimeZip), layout.runtimeDir)
-    await rm(layout.runtimeZip, { force: true })
+    const bytes = await readFile(archivePath)
+    if (runtime.archive === 'tar.gz') await untar(bytes, layout.runtimeDir)
+    else await unzip(bytes, layout.runtimeDir)
+    await rm(archivePath, { force: true })
   }
 
   report({ phase: 'checking', step: 'model', startedAt: Date.now() })

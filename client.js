@@ -86,6 +86,8 @@ window.__ModuleLoader__.load({
         prepReady: 'Ready',
         prepFailed: 'Preparation failed',
         prepCancelled: 'Cancelled',
+        prepUnsupported: 'Not available on this platform',
+        unsupportedHint: 'Only local notes are unavailable here. Every other setting, and the provider route, still work.',
         step_runtime: 'Runtime',
         step_model: 'Model',
         why_dns: 'Could not resolve the host — check the network or the DNS.',
@@ -222,6 +224,8 @@ window.__ModuleLoader__.load({
         prepReady: '已就绪',
         prepFailed: '准备失败',
         prepCancelled: '已取消',
+        prepUnsupported: '这个平台没有可用的运行时',
+        unsupportedHint: '只有本地转述在这一平台不可用；其余设置与供应商转述照常工作。',
         step_runtime: '运行时',
         step_model: '模型',
         why_dns: '域名解析失败，先看看网络和 DNS。',
@@ -847,6 +851,7 @@ window.__ModuleLoader__.load({
 .dccd-prep-actions{display:flex;gap:8px}
 .dccd-prep-actions:empty{display:none}
 .dccd-prep-error{font-size:12px;color:var(--dsw-alias-state-error-primary);overflow-wrap:anywhere}
+.dccd-prep-note{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}
 .dccd-prep-root{overflow-wrap:anywhere}
 @media (width<=480px){.dccd-estimate dl>div,.dccd-source label,.dccd-quant label{grid-template-columns:minmax(0,1fr);gap:6px}}
 `
@@ -1177,7 +1182,10 @@ window.__ModuleLoader__.load({
       // find. Fewer than two entries means something was downloaded and can be removed,
       // even when the server is not running and no job is left to report steps.
       const missing = Array.isArray(view?.missing) ? view.missing : []
-      const onDisk = view !== undefined && (ready || missing.length < 2 || steps.length > 0)
+      // `unsupported` means there is no build for this platform at all, so there is never
+      // anything of ours on disk: offering a delete button would be an empty gesture.
+      const unsupported = view !== undefined ? view.supported === false : phase === 'unsupported'
+      const onDisk = !unsupported && view !== undefined && (ready || missing.length < 2 || steps.length > 0)
       const sources = Array.isArray(view?.downloadSources) ? view.downloadSources : []
       const current = steps.find((step) => step.status === 'running') ?? steps.find((step) => step.status === 'failed')
       // The job carries its own target, and that is what the header names while it runs: a
@@ -1187,7 +1195,7 @@ window.__ModuleLoader__.load({
       const targetLabel = target === undefined || target.quant === undefined ? '' : ` · ${target.quant}`
       const summary = preparing && current !== undefined
         ? `${t('step_' + current.kind)}${targetLabel} · ${current.totalBytes > 0 ? `${megabytes(current.receivedBytes)} / ${megabytes(current.totalBytes)} MB` : t('working')}`
-        : t(phase === 'ready' ? 'prepReady' : phase === 'failed' ? 'prepFailed' : phase === 'cancelled' ? 'prepCancelled' : 'prepUnprepared')
+        : t(phase === 'ready' ? 'prepReady' : phase === 'failed' ? 'prepFailed' : phase === 'cancelled' ? 'prepCancelled' : phase === 'unsupported' ? 'prepUnsupported' : 'prepUnprepared')
 
       const run = (action, extra) => {
         setBusy(true)
@@ -1203,7 +1211,7 @@ window.__ModuleLoader__.load({
           .finally(() => setBusy(false))
       }
 
-      const estimateBlock = startable && estimate !== undefined
+      const estimateBlock = startable && !unsupported && estimate !== undefined
         ? h('div', { key: 'estimate', className: 'dccd-estimate' }, [
           h('p', { key: 'lead' }, t('setupLocal')),
           h('dl', { key: 'dl' }, [
@@ -1245,7 +1253,7 @@ window.__ModuleLoader__.load({
           setOpen((value) => !value)
         },
       }, [
-        h(StateDot, { key: 'dot', state: preparing ? 'running' : phase === 'ready' ? 'complete' : phase === 'failed' ? 'failed' : 'pending' }),
+        h(StateDot, { key: 'dot', state: preparing ? 'running' : phase === 'ready' ? 'complete' : phase === 'failed' ? 'failed' : phase === 'unsupported' ? 'failed' : 'pending' }),
         h('span', { key: 'title', className: 'dccd-prep-title' }, open ? t('prepSteps') : summary),
         steps.length > 0 ? h('span', { key: 'chev', className: 'dccd-chev', 'data-open': open, 'aria-hidden': true }) : null,
       ])
@@ -1275,7 +1283,13 @@ window.__ModuleLoader__.load({
         ])
         : null
 
-      const actions = h('div', { key: 'actions', className: 'dccd-prep-actions' }, [
+      // Nothing here can run without a pinned build, so the buttons that would download,
+      // cancel, stop or delete are left out entirely rather than shown disabled: a disabled
+      // button invites a reader to look for the reason it is greyed out, and the reason is
+      // one sentence that belongs above.
+      const actions = unsupported
+        ? null
+        : h('div', { key: 'actions', className: 'dccd-prep-actions' }, [
         startable
           ? h('button', {
             key: 'prepare',
@@ -1330,11 +1344,18 @@ window.__ModuleLoader__.load({
             }),
           ])
           : null,
+        // One sentence where the controls would be, because there is nothing to control.
+        unsupported
+          ? h('p', { key: 'unsupported', className: 'dccd-prep-note' }, t('unsupportedHint'))
+          : null,
+        // A speed row would promise "it shows up after the first note" to a reader who will
+        // never write one on this machine.
+        unsupported ? null : h(SpeedRow, { key: 'speed', t, speed: view?.speed }),
         // The choice is a setting, not an action: the form owns it and the save button
         // writes it, exactly like every other field. The files on disk come from the Host,
-        // because only it can stat them.
-        h(SpeedRow, { key: 'speed', t, speed: view?.speed }),
-        h(QuantPicker, {
+        // because only it can stat them. With no build to download, it would be a setting
+        // that can only disappoint.
+        unsupported ? null : h(QuantPicker, {
           key: 'quant',
           t,
           quants: view?.quants,

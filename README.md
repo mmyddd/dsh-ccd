@@ -121,7 +121,8 @@ ccd 的每一项可调能力都在这里：
 几处刻意的选择：
 
 - **资产是打死的**，`local.js` 里的 `bytes` 与 `sha256` 是实测值。下载边算边写 `.part`，长度和摘要都对上才 rename 发布，所以半个文件永远不会被下一次启动当成可用模型。
-- **只 pin 了 `win32-x64`**。别的平台报 `unsupported` 而不是下一个起不来的二进制 —— 一个错的二进制比一句清楚的话糟糕得多。
+- **pin 的是实测过的平台**：`win32-x64`、`linux-x64`、`linux-arm64` 三家都钉了字节数与摘要。没测过的（macOS、Windows ARM64）报 `unsupported` 而不是下一个起不来的二进制 —— 一个错的二进制比一句清楚的话糟糕得多。三个平台的归档格式不一样：Windows 是 `.zip`，Linux 是 `.tar.gz` 且里面带符号链接（`libllama.so.0 -> libllama.so.0.8.0`）和可执行位，所以解包器是两条路而不是一条 —— zip 那张表会同时丢掉链接和权限，而缺了其中任何一样的 `llama-server` 都跑不起来。
+- **平台缺口只影响本地模型那一块**。没有 pinned 运行时的平台（现在的 macOS、Windows ARM64）里，卡片只说一句「这个平台没有可用的运行时」，不画估算、不给下载/取消/卸载按钮 —— 给一个禁用按钮会让人去找灰掉的原因，而原因就是那一句话。`prepare` 路由在这种平台上回 `409 unsupported-platform`，不假装 `started: true` 让页面去等永远不会出现的步骤。其余一切照常：供应商转述、切段、笔记持久化、设置页都不碰运行时，换个平台装上去仍然可用。
 - **端口是现取的**：`net.createServer().listen(0)` 拿一个空闲端口再交给 `llama-server`，不写死 `8080`。
 - **模型闲置会卸载**（`localIdleSec`）。一个 GB 的权重常驻没有道理。
 - **能删干净，也只删自己的**。卡片上的「删除文件」会停掉进程、丢掉任务、删掉 `runtime/` 与所有自己下过的 GGUF，然后按磁盘重新判定一次状态。判据是文件名白名单（`QUANTS` 里那些），不是 `.gguf` 后缀：`localDataRoot` 指向一个已有目录时，你自己放进去的 GGUF 既不会被列进「盘上有哪些量化」，也不会被删。
@@ -197,7 +198,7 @@ CREATE TABLE notes (
 | `test/pipeline.mjs` | Client 半断言测试：warm 响应归一化、`consumed` 前缀归属、`notes` 拼接与丢段计数、轮询边界、历史行回填、重试参数 |
 | `test/segment.mjs` | 切段器一致性：`index.js` 的 `takeSegments`/`targetOf` 必须与 `test/golden-segments.json` 的 163 个基准用例完全一致 |
 | `test/store.mjs` | 持久化断言测试：记录契约、zstd 往返与压缩率、双会话隔离、替换非追加、软上限与摊销裁剪、年龄窗口与开库时的一次清扫、读回只取本会话且不复活旧语言、失败原因跨刷新保留 |
-| `test/local.mjs` | 本地运行时断言测试：资产表与平台缺口、估算覆盖、手写解压（含目录穿越）、失败分类、`.part` 不残留、正确文件免联网复用、源探测全失败时保持原序、删除只删自己放的文件 |
+| `test/local.mjs` | 本地运行时断言测试：三个平台的资产表与平台缺口、估算覆盖、手写解压（zip 与 tar.gz，含目录穿越与逃逸符号链接）、失败分类、`.part` 不残留、正确文件免联网复用、源探测全失败时保持原序、删除只删自己放的文件 |
 | `test/settings.mjs` | 设置往返：`first`/`step`/`max` 与 `streamFirst`/`streamStep`/`streamMax` 的别名、空数字框不会被存成最小值、表单真实的每个键都能存下来再读回来 |
 | `test/golden-segments.json` | 切段基准。冻结自当年与 ccd `internal/thinkhide/segment.go` 逐例对齐（402 例零差异）的那份 JS 实现，所以它替 Go 版当基准 |
 | `cordis.patch.yml` | 只 insert 一行 |
@@ -236,4 +237,4 @@ Host 与 Client 之间走 `ctx.webServer.register` + `fetch`，不走 Typert rem
 
 ## 许可
 
-AGPL-3.0，与 ccd 一致。
+MIT。dsh-ccd 自己写的 Host / Client / 本地模型管线都是 MIT；它形式上源自 ccd（那个 Go 项目），但 ccd 的还原机制在这里整段不存在，搬过来的只有切段、并发转述与提示词，这些也一并按 MIT 重写了。

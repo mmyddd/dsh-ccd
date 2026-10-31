@@ -7,10 +7,10 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { deflateRawSync } from 'node:zlib'
+import { deflateRawSync, gzipSync } from 'node:zlib'
 import * as L from '../local.js'
 
 const root = mkdtempSync(join(tmpdir(), 'dsh-ccd-local-'))
@@ -18,19 +18,25 @@ const root = mkdtempSync(join(tmpdir(), 'dsh-ccd-local-'))
 // ── platform table ────────────────────────────────────────────────────────
 
 assert.equal(L.runtimeFor('win32', 'x64').exe, 'llama-server.exe')
-assert.equal(L.runtimeFor('linux', 'x64'), undefined, 'an unpinned platform has no runtime')
-assert.equal(L.runtimeFor('darwin', 'arm64'), undefined)
+assert.equal(L.runtimeFor('linux', 'x64').exe, 'llama-server', 'the Linux build has no .exe suffix')
+assert.equal(L.runtimeFor('linux', 'arm64').archive, 'tar.gz')
+assert.equal(L.runtimeFor('darwin', 'arm64'), undefined, 'an unpinned platform has no runtime')
 
-const assets = L.assetsFor({}, 'win32', 'x64')
-assert.equal(assets.length, 2)
-assert.deepEqual(assets.map((asset) => asset.kind), ['runtime', 'model'])
-for (const asset of assets) {
-  assert.ok(asset.bytes > 0, `${asset.kind} is pinned by size`)
-  assert.match(asset.sha256, /^[0-9a-f]{64}$/)
+for (const [platform, arch] of [['win32', 'x64'], ['linux', 'x64'], ['linux', 'arm64']]) {
+  const pinned = L.runtimeFor(platform, arch)
+  assert.ok(pinned.bytes > 0, `${platform}-${arch} is pinned by size`)
+  assert.match(pinned.sha256, /^[0-9a-f]{64}$/, `${platform}-${arch} is pinned by digest`)
+  const listed = L.assetsFor({}, platform, arch)
+  assert.deepEqual(listed.map((asset) => asset.kind), ['runtime', 'model'])
+  // The pinned asset must be the one the downloader would fetch, byte for byte.
+  assert.equal(listed[0].bytes, pinned.bytes)
+  assert.equal(listed[0].sha256, pinned.sha256)
 }
 // A platform with no runtime still offers the model: the model is platform-independent,
 // and hiding it would only postpone the news to start time.
-assert.deepEqual(L.assetsFor({}, 'linux', 'arm64').map((asset) => asset.kind), ['model'])
+assert.deepEqual(L.assetsFor({}, 'darwin', 'arm64').map((asset) => asset.kind), ['model'])
+
+const assets = L.assetsFor({}, 'win32', 'x64')
 
 // ── estimate ──────────────────────────────────────────────────────────────
 
@@ -120,7 +126,7 @@ assert.equal(L.classifyDownloadFailure(undefined).reason, 'unknown')
 const empty = await L.inspectRuntime(join(root, 'nothing-yet'), 'win32', 'x64')
 assert.equal(empty.phase, 'unprepared')
 assert.deepEqual(empty.missing, ['runtime', 'model'])
-assert.equal((await L.inspectRuntime(root, 'linux', 'x64')).phase, 'unsupported')
+assert.equal((await L.inspectRuntime(root, 'darwin', 'arm64')).phase, 'unsupported')
 
 const layout = L.layoutOf(join(root, 'prepared'))
 mkdirSync(layout.runtimeDir, { recursive: true })
@@ -162,6 +168,87 @@ await assert.rejects(
 // No ".part" survives a failed attempt: a half file must never be resumable by accident.
 assert.deepEqual(readdirSync(root).filter((name) => name.endsWith('.part')), [])
 
+// ── untar ─────────────────────────────────────────────────────────────────
+// Built here for the same reason as the zip: an archive this file can construct is one
+// this file can explain when it fails. The real Linux builds are tarballs carrying
+// symlinks and executable bits, and those two are exactly what a zip extractor loses.
+
+function octal(value, width) {
+  const text = value.toString(8)
+  return `${'0'.repeat(width - 1 - text.length)}${text}${String.fromCharCode(0)}`
+}
+
+function tarHeader({ name, size, type, mode, link }) {
+  const header = Buffer.alloc(512)
+  header.write(name, 0, 'utf8')
+  header.write(octal(mode ?? 0o644, 8), 100, 'utf8')
+  header.write(octal(0, 8), 108, 'utf8')
+  header.write(octal(0, 8), 116, 'utf8')
+  header.write(octal(size, 12), 124, 'utf8')
+  header.write(octal(0, 12), 136, 'utf8')
+  header.write(type, 156, 'utf8')
+  if (link !== undefined) header.write(link, 157, 'utf8')
+  header.write('ustar', 257, 'utf8')
+  header.write('00', 263, 'utf8')
+  // The checksum is computed with its own field read as spaces, which is why it is written
+  // twice: once blank for the sum, then for real.
+  header.write('        ', 148, 'utf8')
+  let sum = 0
+  for (const byte of header) sum += byte
+  header.write(`${sum.toString(8).padStart(6, '0')}${String.fromCharCode(0)} `, 148, 'utf8')
+  return header
+}
+
+function buildTar(entries) {
+  const blocks = []
+  for (const entry of entries) {
+    const body = Buffer.from(entry.content ?? '')
+    blocks.push(tarHeader({ ...entry, size: body.length }))
+    if (body.length > 0) {
+      blocks.push(body)
+      const pad = (512 - (body.length % 512)) % 512
+      if (pad > 0) blocks.push(Buffer.alloc(pad))
+    }
+  }
+  // Two zero blocks end an archive.
+  blocks.push(Buffer.alloc(1024))
+  return gzipSync(Buffer.concat(blocks))
+}
+
+{
+  const archive = buildTar([
+    { name: 'llama-b12015/', type: '5', mode: 0o755 },
+    { name: 'llama-b12015/llama-server', type: '0', mode: 0o755, content: 'ELF payload' },
+    { name: 'llama-b12015/libllama.so.0.8.0', type: '0', mode: 0o644, content: 'shared object' },
+    { name: 'llama-b12015/libllama.so.0', type: '2', link: 'libllama.so.0.8.0' },
+    // A link that points outside the extracted folder is dropped: flattened, it would
+    // reach somewhere the archive never contained.
+    { name: 'llama-b12015/escape', type: '2', link: '../../../etc/passwd' },
+    { name: 'llama-b12015/absolute', type: '2', link: '/etc/passwd' },
+    // Traversal in a plain name is flattened away rather than followed.
+    { name: 'llama-b12015/../../escaped.txt', type: '0', content: 'nope' },
+  ])
+  const out = join(root, 'untar')
+  const written = await L.untar(archive, out)
+  assert.ok(written.includes('llama-server'), 'the server binary is missing')
+  assert.equal(readFileSync(join(out, 'llama-server'), 'utf8'), 'ELF payload')
+  // The executable bit is the reason this is not the zip path: without it the server
+  // cannot be started at all.
+  // Windows has no executable bit to keep: `stat` there reports a fixed mode, so the
+  // question only has an answer on the platform this path exists for.
+  if (process.platform !== 'win32') {
+    assert.equal(statSync(join(out, 'llama-server')).mode & 0o111, 0o111, 'lost the executable bit')
+  }
+  assert.equal(readlinkSync(join(out, 'libllama.so.0')), 'libllama.so.0.8.0')
+  assert.equal(lstatSync(join(out, 'libllama.so.0')).isSymbolicLink(), true)
+  assert.equal(existsSync(join(out, 'escape')), false, 'an escaping symlink was created')
+  assert.equal(existsSync(join(out, 'absolute')), false, 'an absolute symlink was created')
+  assert.equal(existsSync(join(root, 'escaped.txt')), false, 'a traversal name escaped the folder')
+  assert.equal(existsSync(join(out, 'escaped.txt')), true, 'the traversal was not flattened')
+
+  await assert.rejects(() => L.untar(Buffer.from('not gzip'), join(root, 'untar-junk')))
+}
+
 // ── orderSources ──────────────────────────────────────────────────────────
 
 assert.deepEqual(await L.orderSources('/x', ['https://only.example'], 1000, undefined), ['https://only.example'])
@@ -173,10 +260,23 @@ assert.deepEqual(dead.sort(), ['https://a.example', 'https://b.example'])
 // ── layout ────────────────────────────────────────────────────────────────
 
 const fixed = L.layoutOf('/data')
-assert.equal(fixed.runtimeZip, join('/data', 'runtime', 'llama.zip'))
+// The archive is a scratch file whose name follows the platform, so the layout exposes the
+// folder rather than a fixed file name.
+assert.equal(fixed.runtimeRoot, join('/data', 'runtime'))
 assert.equal(fixed.runtimeDir, join('/data', 'runtime', 'bin'))
 assert.ok(fixed.model.startsWith(join('/data', 'models')))
 assert.ok(fixed.model.endsWith('.gguf'))
+
+// ── the platform answer the card reads ────────────────────────────────────
+
+{
+  // `supported` is what the page keys off instead of re-deriving it from the phase, so the
+  // two halves cannot disagree. The rest of the plugin is unaffected: the provider route
+  // needs no runtime, and every other setting keeps working on a platform with no build.
+  const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  assert.match(src, /supported: runtimeFor\(platform, arch\) !== undefined/, 'localView does not report support')
+  assert.match(src, /has no pinned runtime/, 'the prepare route does not refuse an unsupported platform')
+}
 
 // ── removeRuntime ─────────────────────────────────────────────────────────
 
@@ -186,7 +286,7 @@ assert.ok(fixed.model.endsWith('.gguf'))
   mkdirSync(join(prepared, 'runtime', 'bin'), { recursive: true })
   mkdirSync(join(prepared, 'models'), { recursive: true })
   writeFileSync(join(prepared, 'runtime', 'bin', 'llama-server.exe'), 'MZ')
-  writeFileSync(join(prepared, 'runtime', 'llama.zip'), 'zip')
+  writeFileSync(join(prepared, 'runtime', 'llama-b12015-bin-ubuntu-x64.tar.gz'), 'archive')
   writeFileSync(join(prepared, 'models', L.modelFile('Q4_K_M')), 'gguf')
   // Something the reader put there, which this plugin must not touch.
   writeFileSync(join(prepared, 'notes.txt'), 'mine')
@@ -313,7 +413,14 @@ assert.ok(fixed.model.endsWith('.gguf'))
   // nothing there at all, and a file that exists but is not an executable.
   const gone = join(root, 'spawn-gone')
   const absent = new L.LocalRuntime({ dataRoot: gone, platform: process.platform, arch: process.arch, quant: 'Q4_K_M', threads: 2, contextSize: 2048 })
-  await assert.rejects(() => absent.ensure(), (error) => error.code === 'NOT_PREPARED')
+  // Only one platform has a pinned runtime, so this asserts the shape that applies here
+  // rather than a Windows-only message: the point is that `ensure` rejects at all instead of
+  // leaving a caller waiting on a process that will never exist.
+  if (L.runtimeFor(process.platform, process.arch) === undefined) {
+    await assert.rejects(() => absent.ensure(), /no pinned runtime/)
+  } else {
+    await assert.rejects(() => absent.ensure(), (error) => error.code === 'NOT_PREPARED')
+  }
   assert.equal(absent.status().running, false)
 
   const broken = join(root, 'spawn-broken')
