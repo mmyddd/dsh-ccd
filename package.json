@@ -1,6 +1,6 @@
 {
   "name": "dsh-ccd",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Show the user short first-person working notes instead of the raw chain of thought, while the model keeps seeing the full reasoning",
   "license": "MIT",
   "author": "YG",
