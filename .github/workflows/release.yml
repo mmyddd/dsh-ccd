@@ -80,3 +80,58 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release view "$GITHUB_REF_NAME" --json url,isDraft,tagName,assets --jq '"\(.url)\ndraft=\(.isDraft)\n" + (.assets[] | "  \(.name) \(.size)")'
+
+  publish-npm:
+    # Trusted publishing: no npm token anywhere. GitHub mints an OIDC token for
+    # this job and the npm CLI exchanges it for a short-lived publish credential.
+    # The Trusted Publisher on npmjs.com must name exactly this file
+    # (release.yml), this repository, and allow `npm publish`.
+    needs: quality
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # No `registry-url` on purpose: it would write
+      # `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}` into .npmrc, and with
+      # trusted publishing there is no token to put there.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Trusted publishing needs npm >= 11.5.1. The runner image is usually newer,
+      # but pinning the floor makes an image change fail here instead of silently
+      # losing OIDC.
+      - name: Make sure npm supports trusted publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install -g npm@^11.5.1
+          npm --version
+
+      - name: Verify the tag matches the manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p "require('./package.json').version")"
+          echo "tag=$tag manifest=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match package.json version $version"
+            exit 1
+          fi
+
+      - name: Publish to npm
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          # Re-running an old tag must not turn a green release red.
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version is already on the registry, nothing to publish"
+            exit 0
+          fi
+          npm publish --access public
