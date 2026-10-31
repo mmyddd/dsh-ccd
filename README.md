@@ -16,15 +16,25 @@
 
 ## 安装
 
-从 GitHub 装，不需要 build，唯一的运行时依赖是 `@deepseek-ai/schemastery`（导出 Config schema 用）：
+在 DSH 的**插件**页按右上角「添加插件」，把仓库地址贴进去就完事：
+
+```
+https://github.com/mmyddd/dsh-ccd
+```
+
+那个框认三种写法 —— 包名、GitHub 仓库地址、本地目录路径 —— 贴 GitHub 地址就是从这里装，不需要 build，也不需要先 clone。想钉死某个版本就在末尾加 `#<commit>`。
+
+仓库本身走 `git` 克隆，DSH 会先 `git ls-remote` 探一次连通性 —— 连不上就直接说连不上，不会走进 pnpm 里绕一圈再报一个看不懂的错。克隆之后 pnpm 还要拉那个唯一的运行时依赖 `@deepseek-ai/schemastery`，那是从 npm 源取的：国内网络卡在这一步时，把下方「安装源」切到「中国大陆镜像源」即可（这个下拉只影响 npm 那一段，不影响 git 克隆）。
+
+改代码时直接填本地目录（`C:/Git/dsh-ccd`）更顺手，装出来的东西等价，只是不经过拷贝、改完刷新即见。
+
+同一条路也有工具入口，写脚本或不方便点按钮时用：
 
 ```
 plugin_manager action=install_bundle target="github:mmyddd/dsh-ccd"
 ```
 
-`install_bundle` 认得 `github:owner/repo` 这种简写，也认 `https://github.com/owner/repo` 和 `owner/repo#<commit>`；给 commit 就是钉死一个版本。走 GitHub 时插件管理器会先 `git ls-remote` 探一次连通性，网络抖了会直接说清楚是连不上而不是走进 pnpm 里绕。
-
-改代码时用本地目录更顺手（`target="C:/Git/dsh-ccd"`），装出来的东西等价，只是不经过拷贝。
+插件管理器认 `github:owner/repo` 简写、`https://github.com/owner/repo` 和 `owner/repo#<commit>`，三种等价。
 
 装完重启 DSH 生效 —— 只改 `client.js` 之后靠 client HMR 热更，不用重启；`index.js` 的改动必须重启。`dsh-app-boot` 用裸 `await import()` 加载 Host 半，没有 cache-bust。
 
