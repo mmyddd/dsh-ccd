@@ -11,7 +11,11 @@ import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const source = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+// Normalised: the marker below contains a newline, and this checkout is CRLF on
+// Windows and LF elsewhere. Matching the raw file makes one commit pass on one
+// runner and fail on the other.
+const CR = String.fromCharCode(13)
+const source = readFileSync(new URL('../index.js', import.meta.url), 'utf8').split(CR).join('')
 const start = source.indexOf('const NOTES_SCHEMA_VERSION')
 const end = source.indexOf('/**\n * Blocks being back-filled right now')
 if (start < 0 || end < 0) throw new Error('stored-notes section not found in index.js')
